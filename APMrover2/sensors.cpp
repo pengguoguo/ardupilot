@@ -1,98 +1,129 @@
-// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
-
 #include "Rover.h"
 
-void Rover::init_barometer(void)
+#include <AP_RangeFinder/AP_RangeFinder_Backend.h>
+#include <AP_VisualOdom/AP_VisualOdom.h>
+
+// check for new compass data - 10Hz
+void Rover::update_compass(void)
 {
-    gcs_send_text_P(SEVERITY_LOW, PSTR("Calibrating barometer"));    
-    barometer.calibrate();
-    gcs_send_text_P(SEVERITY_LOW, PSTR("barometer calibration complete"));
+    if (AP::compass().enabled() && compass.read()) {
+        ahrs.set_compass(&compass);
+    }
 }
 
-void Rover::init_sonar(void)
-{
-    sonar.init();
+// Save compass offsets
+void Rover::compass_save() {
+    if (AP::compass().enabled() &&
+        compass.get_learn_type() >= Compass::LEARN_INTERNAL &&
+        !arming.is_armed()) {
+        compass.save_offsets();
+    }
 }
 
-// read_battery - reads battery voltage and current and invokes failsafe
-// should be called at 10hz
-void Rover::read_battery(void)
+// update wheel encoders
+void Rover::update_wheel_encoder()
 {
-    battery.read();
-}
-
-// read the receiver RSSI as an 8 bit number for MAVLink
-// RC_CHANNELS_SCALED message
-void Rover::read_receiver_rssi(void)
-{
-    rssi_analog_source->set_pin(g.rssi_pin);
-    float ret = rssi_analog_source->voltage_average() * 50;
-    receiver_rssi = constrain_int16(ret, 0, 255);
-}
-
-// read the sonars
-void Rover::read_sonars(void)
-{
-    sonar.update();
-
-    if (sonar.status() == RangeFinder::RangeFinder_NotConnected) {
-        // this makes it possible to disable sonar at runtime
+    // exit immediately if not enabled
+    if (g2.wheel_encoder.num_sensors() == 0) {
         return;
     }
 
-    if (sonar.has_data(1)) {
-        // we have two sonars
-        obstacle.sonar1_distance_cm = sonar.distance_cm(0);
-        obstacle.sonar2_distance_cm = sonar.distance_cm(1);
-        if (obstacle.sonar1_distance_cm <= (uint16_t)g.sonar_trigger_cm &&
-            obstacle.sonar1_distance_cm <= (uint16_t)obstacle.sonar2_distance_cm)  {
-            // we have an object on the left
-            if (obstacle.detected_count < 127) {
-                obstacle.detected_count++;
-            }
-            if (obstacle.detected_count == g.sonar_debounce) {
-                gcs_send_text_fmt(PSTR("Sonar1 obstacle %u cm"),
-                                  (unsigned)obstacle.sonar1_distance_cm);
-            }
-            obstacle.detected_time_ms = hal.scheduler->millis();
-            obstacle.turn_angle = g.sonar_turn_angle;
-        } else if (obstacle.sonar2_distance_cm <= (uint16_t)g.sonar_trigger_cm) {
-            // we have an object on the right
-            if (obstacle.detected_count < 127) {
-                obstacle.detected_count++;
-            }
-            if (obstacle.detected_count == g.sonar_debounce) {
-                gcs_send_text_fmt(PSTR("Sonar2 obstacle %u cm"),
-                                  (unsigned)obstacle.sonar2_distance_cm);
-            }
-            obstacle.detected_time_ms = hal.scheduler->millis();
-            obstacle.turn_angle = -g.sonar_turn_angle;
-        }
-    } else {
-        // we have a single sonar
-        obstacle.sonar1_distance_cm = sonar.distance_cm(0);
-        obstacle.sonar2_distance_cm = 0;
-        if (obstacle.sonar1_distance_cm <= (uint16_t)g.sonar_trigger_cm)  {
-            // obstacle detected in front 
-            if (obstacle.detected_count < 127) {
-                obstacle.detected_count++;
-            }
-            if (obstacle.detected_count == g.sonar_debounce) {
-                gcs_send_text_fmt(PSTR("Sonar obstacle %u cm"),
-                                  (unsigned)obstacle.sonar1_distance_cm);
-            }
-            obstacle.detected_time_ms = hal.scheduler->millis();
-            obstacle.turn_angle = g.sonar_turn_angle;
-        }
+    // update encoders
+    g2.wheel_encoder.update();
+
+    // save cumulative distances at current time (in meters) for reporting to GCS
+    for (uint8_t i = 0; i < g2.wheel_encoder.num_sensors(); i++) {
+        wheel_encoder_last_distance_m[i] = g2.wheel_encoder.get_distance(i);
     }
 
-    Log_Write_Sonar();
+    // send wheel encoder delta angle and delta time to EKF
+    // this should not be done at more than 50hz
+    // initialise on first iteration
+    if (!wheel_encoder_initialised) {
+        wheel_encoder_initialised = true;
+        for (uint8_t i = 0; i < g2.wheel_encoder.num_sensors(); i++) {
+            wheel_encoder_last_angle_rad[i] = g2.wheel_encoder.get_delta_angle(i);
+            wheel_encoder_last_reading_ms[i] = g2.wheel_encoder.get_last_reading_ms(i);
+        }
+        return;
+    }
 
-    // no object detected - reset after the turn time
-    if (obstacle.detected_count >= g.sonar_debounce &&
-        hal.scheduler->millis() > obstacle.detected_time_ms + g.sonar_turn_time*1000) { 
-        gcs_send_text_fmt(PSTR("Obstacle passed"));
-        obstacle.detected_count = 0;
-        obstacle.turn_angle = 0;
+    // on each iteration send data from alternative wheel encoders
+    wheel_encoder_last_index_sent++;
+    if (wheel_encoder_last_index_sent >= g2.wheel_encoder.num_sensors()) {
+        wheel_encoder_last_index_sent = 0;
+    }
+
+    // get current time, total delta angle (since startup) and update time from sensor
+    const float curr_angle_rad = g2.wheel_encoder.get_delta_angle(wheel_encoder_last_index_sent);
+    const uint32_t sensor_reading_ms = g2.wheel_encoder.get_last_reading_ms(wheel_encoder_last_index_sent);
+    const uint32_t now_ms = AP_HAL::millis();
+
+    // calculate angular change (in radians)
+    const float delta_angle = curr_angle_rad - wheel_encoder_last_angle_rad[wheel_encoder_last_index_sent];
+    wheel_encoder_last_angle_rad[wheel_encoder_last_index_sent] = curr_angle_rad;
+
+    // calculate delta time using time between sensor readings or time since last send to ekf (whichever is shorter)
+    uint32_t sensor_diff_ms = sensor_reading_ms - wheel_encoder_last_reading_ms[wheel_encoder_last_index_sent];
+    if (sensor_diff_ms == 0 || sensor_diff_ms > 100) {
+        // if no sensor update or time difference between sensor readings is too long use time since last send to ekf
+        sensor_diff_ms = now_ms - wheel_encoder_last_reading_ms[wheel_encoder_last_index_sent];
+        wheel_encoder_last_reading_ms[wheel_encoder_last_index_sent] = now_ms;
+    } else {
+        wheel_encoder_last_reading_ms[wheel_encoder_last_index_sent] = sensor_reading_ms;
+    }
+    const float delta_time = sensor_diff_ms * 0.001f;
+
+    /* delAng is the measured change in angular position from the previous measurement where a positive rotation is produced by forward motion of the vehicle (rad)
+     * delTime is the time interval for the measurement of delAng (sec)
+     * timeStamp_ms is the time when the rotation was last measured (msec)
+     * posOffset is the XYZ body frame position of the wheel hub (m)
+     */
+    EKF3.writeWheelOdom(delta_angle,
+                        delta_time,
+                        wheel_encoder_last_reading_ms[wheel_encoder_last_index_sent],
+                        g2.wheel_encoder.get_pos_offset(wheel_encoder_last_index_sent),
+                        g2.wheel_encoder.get_wheel_radius(wheel_encoder_last_index_sent));
+}
+
+// Accel calibration
+
+void Rover::accel_cal_update() {
+    if (hal.util->get_soft_armed()) {
+        return;
+    }
+    ins.acal_update();
+    // check if new trim values, and set them    float trim_roll, trim_pitch;
+    float trim_roll, trim_pitch;
+    if (ins.get_new_trim(trim_roll, trim_pitch)) {
+        ahrs.set_trim(Vector3f(trim_roll, trim_pitch, 0));
+    }
+}
+
+// read the rangefinders
+void Rover::read_rangefinders(void)
+{
+    rangefinder.update();
+    Log_Write_Depth();
+}
+
+/*
+  ask airspeed sensor for a new value, duplicated from plane
+ */
+void Rover::read_airspeed(void)
+{
+    g2.airspeed.update(should_log(MASK_LOG_IMU));
+}
+
+/*
+  update RPM sensors
+ */
+void Rover::rpm_update(void)
+{
+    rpm_sensor.update();
+    if (rpm_sensor.enabled(0) || rpm_sensor.enabled(1)) {
+        if (should_log(MASK_LOG_RC)) {
+            logger.Write_RPM(rpm_sensor);
+        }
     }
 }

@@ -12,18 +12,51 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#ifndef AP_VEHICLE_H
-#define AP_VEHICLE_H
+#pragma once
+
 /*
   this header holds a parameter structure for each vehicle type for
   parameters needed by multiple libraries
  */
 
-#include <AP_Param.h>
+#include "ModeReason.h" // reasons can't be defined in this header due to circular loops
 
-class AP_Vehicle {
+#include <AP_Baro/AP_Baro.h>
+#include <AP_BoardConfig/AP_BoardConfig.h>     // board configuration library
+#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
+#include <AP_Button/AP_Button.h>
+#include <AP_GPS/AP_GPS.h>
+#include <AP_Logger/AP_Logger.h>
+#include <AP_Notify/AP_Notify.h>                    // Notify library
+#include <AP_Param/AP_Param.h>
+#include <AP_RangeFinder/AP_RangeFinder.h>
+#include <AP_Relay/AP_Relay.h>                      // APM relay
+#include <AP_RSSI/AP_RSSI.h>                        // RSSI Library
+#include <AP_Scheduler/AP_Scheduler.h>
+#include <AP_SerialManager/AP_SerialManager.h>      // Serial manager library
+#include <AP_ServoRelayEvents/AP_ServoRelayEvents.h>
+#include <AP_Camera/AP_RunCam.h>
+
+class AP_Vehicle : public AP_HAL::HAL::Callbacks {
 
 public:
+
+    AP_Vehicle() {
+        if (_singleton) {
+            AP_HAL::panic("Too many Vehicles");
+        }
+        AP_Param::setup_object_defaults(this, var_info);
+        _singleton = this;
+    }
+
+    /* Do not allow copies */
+    AP_Vehicle(const AP_Vehicle &other) = delete;
+    AP_Vehicle &operator=(const AP_Vehicle&) = delete;
+
+    static AP_Vehicle *get_singleton();
+
+    bool virtual set_mode(const uint8_t new_mode, const ModeReason reason) = 0;
+
     /*
       common parameters for fixed wing aircraft
      */
@@ -35,12 +68,39 @@ public:
         AP_Int8 takeoff_throttle_max;
         AP_Int16 airspeed_min;
         AP_Int16 airspeed_max;
+        AP_Int32 airspeed_cruise_cm;
+        AP_Int32 min_gndspeed_cm;
+        AP_Int8  crash_detection_enable;
+        AP_Int16 roll_limit_cd;
         AP_Int16 pitch_limit_max_cd;
         AP_Int16 pitch_limit_min_cd;        
         AP_Int8  autotune_level;
-        AP_Int16 land_pitch_cd;
-        AP_Float land_flare_sec;
         AP_Int8  stall_prevention;
+        AP_Int16 loiter_radius;
+
+        struct Rangefinder_State {
+            bool in_range:1;
+            bool have_initial_reading:1;
+            bool in_use:1;
+            float initial_range;
+            float correction;
+            float initial_correction;
+            float last_stable_correction;
+            uint32_t last_correction_time_ms;
+            uint8_t in_range_count;
+            float height_estimate;
+            float last_distance;
+        };
+
+
+        // stages of flight
+        enum FlightStage {
+            FLIGHT_TAKEOFF       = 1,
+            FLIGHT_VTOL          = 2,
+            FLIGHT_NORMAL        = 3,
+            FLIGHT_LAND          = 4,
+            FLIGHT_ABORT_LAND    = 7
+        };
     };
 
     /*
@@ -49,9 +109,69 @@ public:
     struct MultiCopter {
         AP_Int16 angle_max;
     };
+
+    void get_common_scheduler_tasks(const AP_Scheduler::Task*& tasks, uint8_t& num_tasks);
+
+    // initialize the vehicle. Called from AP_BoardConfig
+    void init_vehicle();
+
+protected:
+
+    // board specific config
+    AP_BoardConfig BoardConfig;
+
+#if HAL_WITH_UAVCAN
+    // board specific config for CAN bus
+    AP_BoardConfig_CAN BoardConfig_CAN;
+#endif
+
+    // sensor drivers
+    AP_GPS gps;
+    AP_Baro barometer;
+    Compass compass;
+    AP_InertialSensor ins;
+    AP_Button button;
+    RangeFinder rangefinder;
+
+    AP_RSSI rssi;
+#if HAL_RUNCAM_ENABLED
+    AP_RunCam runcam;
+#endif
+    AP_SerialManager serial_manager;
+
+    AP_Relay relay;
+
+    AP_ServoRelayEvents ServoRelayEvents;
+
+    // notification object for LEDs, buzzers etc (parameter set to
+    // false disables external leds)
+    AP_Notify notify;
+
+    // Inertial Navigation EKF
+#if AP_AHRS_NAVEKF_AVAILABLE
+    NavEKF2 EKF2{&ahrs};
+    NavEKF3 EKF3{&ahrs};
+    AP_AHRS_NavEKF ahrs{EKF2, EKF3};
+#else
+    AP_AHRS_DCM ahrs;
+#endif
+
+    static const struct AP_Param::GroupInfo var_info[];
+    static const struct AP_Scheduler::Task scheduler_tasks[];
+
+private:
+
+    static AP_Vehicle *_singleton;
+    bool init_done;
+
 };
 
+namespace AP {
+    AP_Vehicle *vehicle();
+};
+
+extern const AP_HAL::HAL& hal;
+
+extern const AP_Param::Info vehicle_var_info[];
 
 #include "AP_Vehicle_Type.h"
-
-#endif // AP_VEHICLE_H
