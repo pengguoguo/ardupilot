@@ -901,6 +901,7 @@ private:
     bool set_mode(Mode& new_mode, const ModeReason reason);
     bool set_mode(const uint8_t mode, const ModeReason reason) override;
     bool set_mode_by_number(const Mode::Number new_mode_number, const ModeReason reason);
+    uint8_t get_mode() const override { return (uint8_t)control_mode->mode_number(); }
     Mode *mode_from_mode_num(const enum Mode::Number num);
     void check_long_failsafe();
     void check_short_failsafe();
@@ -1047,7 +1048,6 @@ private:
                   "_failsafe_priorities is missing the sentinel");
 
 public:
-    void mavlink_delay_cb();
     void failsafe_check(void);
 };
 

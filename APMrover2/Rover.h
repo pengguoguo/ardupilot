@@ -390,6 +390,7 @@ private:
     void update_ahrs_flyforward();
     bool set_mode(Mode &new_mode, ModeReason reason);
     bool set_mode(const uint8_t new_mode, ModeReason reason) override;
+    uint8_t get_mode() const override { return (uint8_t)control_mode->mode_number(); }
     bool mavlink_set_mode(uint8_t mode);
     void startup_INS_ground(void);
     void notify_mode(const Mode *new_mode);
@@ -428,7 +429,6 @@ private:
 
 
 public:
-    void mavlink_delay_cb();
     void failsafe_check();
     // Motor test
     void motor_test_output();
