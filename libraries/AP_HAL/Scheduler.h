@@ -36,7 +36,13 @@ public:
       A value of zero cancels the previous expected delay
      */
     virtual void     expect_delay_ms(uint32_t ms) { }
-    
+
+    /*
+      return true if we are in a period of expected delay. This can be
+      used to suppress error messages
+     */
+    virtual bool     in_expected_delay(void) const { return false; }
+
     /*
       end the priority boost from delay_microseconds_boost()
      */
@@ -60,7 +66,9 @@ public:
     virtual void     register_timer_failsafe(AP_HAL::Proc,
                                              uint32_t period_us) = 0;
 
-    virtual void     system_initialized() = 0;
+    // check and set the startup state
+    virtual void     set_system_initialized() = 0;
+    virtual bool     is_system_initialized() = 0;
 
     virtual void     reboot(bool hold_in_bootloader) = 0;
 
@@ -100,6 +108,7 @@ public:
         PRIORITY_I2C,
         PRIORITY_CAN,
         PRIORITY_TIMER,
+        PRIORITY_RCOUT,
         PRIORITY_RCIN,
         PRIORITY_IO,
         PRIORITY_UART,
@@ -134,3 +143,24 @@ public:
 #define EXPECT_DELAY_MS(ms) DELAY_JOIN( ms, __COUNTER__ )
 #define DELAY_JOIN( ms, counter) _DO_DELAY_JOIN( ms, counter )
 #define _DO_DELAY_JOIN( ms, counter ) ExpectDelay _getdelay ## counter(ms)
+
+
+/*
+  TIME_CHECK() can be used to unexpected detect long delays. Scatter
+  them in likely places and any long delays will be printed
+ */
+
+class TimeCheck {
+public:
+    TimeCheck(uint32_t limit_ms, const char *file, uint32_t line);
+    ~TimeCheck();
+private:
+    const uint32_t limit_ms;
+    const uint32_t line;
+    const char *file;
+    uint32_t start_ms;
+};
+
+#define TIME_CHECK(limit_ms) JOIN_TC(limit_ms, __FILE__, __LINE__, __COUNTER__ )
+#define JOIN_TC(limit_ms, file, line, counter ) _DO_JOIN_TC( limit_ms, file, line, counter )
+#define _DO_JOIN_TC(limit_ms, file, line, counter ) TimeCheck _gettc ## counter(limit_ms, file, line)

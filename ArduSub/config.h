@@ -14,7 +14,6 @@
 
 // run at 400Hz on all systems
 # define MAIN_LOOP_RATE    400
-# define MAIN_LOOP_SECONDS 0.0025f
 
 #ifndef SURFACE_DEPTH_DEFAULT
 # define SURFACE_DEPTH_DEFAULT -10.0f // pressure sensor reading 10cm depth means craft is considered surfaced
@@ -33,14 +32,6 @@
 
 #ifndef CIRCLE_NAV_ENABLED
 # define CIRCLE_NAV_ENABLED ENABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-// RPM
-//
-
-#ifndef RPM_ENABLED
-# define RPM_ENABLED DISABLED
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
@@ -88,15 +79,8 @@
 # define AVOIDANCE_ENABLED DISABLED
 #endif
 
-#if AVOIDANCE_ENABLED == ENABLED // Avoidance Library relies on Proximity and Fence
-# define PROXIMITY_ENABLED ENABLED
+#if AVOIDANCE_ENABLED == ENABLED // Avoidance Library relies on Fence
 # define FENCE_ENABLED ENABLED
-#endif
-
-// Proximity sensor
-//
-#ifndef PROXIMITY_ENABLED
-# define PROXIMITY_ENABLED DISABLED
 #endif
 
 #ifndef MAV_SYSTEM_ID
@@ -108,43 +92,10 @@
 #endif
 
 //////////////////////////////////////////////////////////////////////////////
-//  MAGNETOMETER
-#ifndef MAGNETOMETER
-# define MAGNETOMETER                   ENABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-//  OPTICAL_FLOW
-#ifndef OPTFLOW
-# define OPTFLOW       DISABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-//  gripper
-#ifndef GRIPPER_ENABLED
-# define GRIPPER_ENABLED DISABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
 // Nav-Guided - allows external nav computer to control vehicle
 #ifndef NAV_GUIDED
 # define NAV_GUIDED    ENABLED
 #endif
-
-//////////////////////////////////////////////////////////////////////////////
-// CAMERA TRIGGER AND CONTROL
-//
-#ifndef CAMERA
-# define CAMERA        DISABLED
-#endif
-
-//////////////////////////////////////////////////////////////////////////////
-// MOUNT (ANTENNA OR CAMERA)
-//
-#ifndef MOUNT
-# define MOUNT         ENABLED
-#endif
-
 
 //////////////////////////////////////////////////////////////////////////////
 // Flight mode definitions
@@ -256,17 +207,4 @@
     MASK_LOG_COMPASS | \
     MASK_LOG_CAMERA | \
     MASK_LOG_MOTBATT
-#endif
-
-// Enable/disable Fence
-#ifndef AC_FENCE
-#define AC_FENCE ENABLED
-#endif
-
-#ifndef AC_RALLY
-#define AC_RALLY   DISABLED
-#endif
-
-#ifndef AC_TERRAIN
-#define AC_TERRAIN DISABLED // Requires Rally enabled as well
 #endif

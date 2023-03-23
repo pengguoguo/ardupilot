@@ -1,4 +1,5 @@
 #include <AP_HAL/AP_HAL.h>
+#include <GCS_MAVLink/GCS.h>
 #include "AC_PrecLand_Companion.h"
 
 // perform any required initialisation of backend
@@ -42,19 +43,33 @@ float AC_PrecLand_Companion::distance_to_target()
     return _distance_to_target;
 }
 
-void AC_PrecLand_Companion::handle_msg(const mavlink_message_t &msg)
+void AC_PrecLand_Companion::handle_msg(const mavlink_landing_target_t &packet, uint32_t timestamp_ms)
 {
-    // parse mavlink message
-    __mavlink_landing_target_t packet;
-    mavlink_msg_landing_target_decode(&msg, &packet);
-
-    _timestamp_us = packet.time_usec;
     _distance_to_target = packet.distance;
 
-    // compute unit vector towards target
-    _los_meas_body = Vector3f(-tanf(packet.angle_y), tanf(packet.angle_x), 1.0f);
-    _los_meas_body /= _los_meas_body.length();
+    if (packet.position_valid == 1) {
+        if (packet.frame == MAV_FRAME_BODY_FRD) {
+            if (_distance_to_target > 0) {
+                _los_meas_body = Vector3f(packet.x, packet.y, packet.z);
+                _los_meas_body /= _distance_to_target;
+            } else {
+                // distance to target must be positive
+                return;
+            }
+        } else {
+            //we do not support this frame
+            if (!_wrong_frame_msg_sent) {
+                _wrong_frame_msg_sent = true;
+                gcs().send_text(MAV_SEVERITY_INFO,"Plnd: Frame not supported ");
+            }
+            return;
+        }
+    } else {
+        // compute unit vector towards target
+        _los_meas_body = Vector3f(-tanf(packet.angle_y), tanf(packet.angle_x), 1.0f);
+        _los_meas_body /= _los_meas_body.length();
+    }
 
-    _los_meas_time_ms = AP_HAL::millis();
+    _los_meas_time_ms = timestamp_ms;
     _have_los_meas = true;
 }

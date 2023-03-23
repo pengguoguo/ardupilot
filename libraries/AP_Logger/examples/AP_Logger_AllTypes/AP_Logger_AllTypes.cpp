@@ -4,6 +4,7 @@
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Logger/AP_Logger.h>
+#include <AP_Scheduler/AP_Scheduler.h>
 #include <GCS_MAVLink/GCS_Dummy.h>
 #include <stdio.h>
 
@@ -106,6 +107,7 @@ private:
 
     AP_Int32 log_bitmask;
     AP_Logger logger{log_bitmask};
+    AP_Scheduler scheduler;
 
     void Log_Write_TypeMessages();
     void Log_Write_TypeMessages_Log_Write();
@@ -245,7 +247,7 @@ void AP_LoggerTest_AllTypes::setup(void)
 {
     hal.console->printf("Logger All Types 1.0\n");
 
-    log_bitmask = (uint32_t)-1;
+    log_bitmask.set((uint32_t)-1);
     logger.Init(log_structure, ARRAY_SIZE(log_structure));
     logger.set_vehicle_armed(true);
     logger.Write_Message("AP_Logger Test");

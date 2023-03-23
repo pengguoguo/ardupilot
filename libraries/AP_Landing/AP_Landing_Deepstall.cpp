@@ -18,11 +18,15 @@
  */
 
 #include "AP_Landing.h"
+
+#if HAL_LANDING_DEEPSTALL_ENABLED
+
 #include <GCS_MAVLink/GCS.h>
 #include <AP_HAL/AP_HAL.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AP_Common/Location.h>
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_Logger/AP_Logger.h>
 
 // table of user settable parameters for deepstall
 const AP_Param::GroupInfo AP_Landing_Deepstall::var_info[] = {
@@ -49,7 +53,7 @@ const AP_Param::GroupInfo AP_Landing_Deepstall::var_info[] = {
 
     // @Param: APP_EXT
     // @DisplayName: Deepstall approach extension
-    // @Description: The forward velocity of the aircraft while stalled
+    // @Description: The horizontal distance from which the aircraft will approach before the stall
     // @Range: 10 200
     // @Units: m
     // @User: Advanced
@@ -99,7 +103,7 @@ const AP_Param::GroupInfo AP_Landing_Deepstall::var_info[] = {
     // @DisplayName: Deepstall L1 period
     // @Description: Deepstall L1 navigational controller period
     // @Range: 5 50
-    // @Units: m
+    // @Units: s
     // @User: Advanced
     AP_GROUPINFO("L1", 10, AP_Landing_Deepstall, L1_period, 30.0),
 
@@ -114,7 +118,7 @@ const AP_Param::GroupInfo AP_Landing_Deepstall::var_info[] = {
     // @DisplayName: Deepstall yaw rate limit
     // @Description: The yaw rate limit while navigating in deepstall
     // @Range: 0 90
-    // @Units degrees per second
+    // @Units: deg/s
     // @User: Advanced
     AP_GROUPINFO("YAW_LIM", 12, AP_Landing_Deepstall, yaw_rate_limit, 10),
 
@@ -122,19 +126,36 @@ const AP_Param::GroupInfo AP_Landing_Deepstall::var_info[] = {
     // @DisplayName: Deepstall L1 time constant
     // @Description: Time constant for deepstall L1 control
     // @Range: 0 1
-    // @Units seconds
+    // @Units: s
     // @User: Advanced
     AP_GROUPINFO("L1_TCON", 13, AP_Landing_Deepstall, time_constant, 0.4),
 
-    // @Group: DS_
-    // @Path: ../PID/PID.cpp
+    // @Param: P
+    // @DisplayName: P gain
+    // @Description: P gain
+    // @User: Standard
+
+    // @Param: I
+    // @DisplayName: I gain
+    // @Description: I gain
+    // @User: Standard
+
+    // @Param: D
+    // @DisplayName: D gain
+    // @Description: D gain
+    // @User: Standard
+
+    // @Param: IMAX
+    // @DisplayName: IMax
+    // @Description: Maximum integrator value
+    // @User: Standard
     AP_SUBGROUPINFO(ds_PID, "", 14, AP_Landing_Deepstall, PID),
 
     // @Param: ABORTALT
     // @DisplayName: Deepstall minimum abort altitude
     // @Description: The minimum altitude which the aircraft must be above to abort a deepstall landing
     // @Range: 0 50
-    // @Units meters
+    // @Units: m
     // @User: Advanced
     AP_GROUPINFO("ABORTALT", 15, AP_Landing_Deepstall, min_abort_alt, 0.0f),
 
@@ -270,7 +291,7 @@ bool AP_Landing_Deepstall::verify_land(const Location &prev_WP_loc, Location &ne
             height_above_target = -height_above_target;
         } else {
             Location position;
-            if (landing.ahrs.get_position(position)) {
+            if (landing.ahrs.get_location(position)) {
                 height_above_target = (position.alt - landing_point.alt + approach_alt_offset * 100) * 1e-2f;
             } else {
                 height_above_target = approach_alt_offset;
@@ -428,13 +449,13 @@ bool AP_Landing_Deepstall::send_deepstall_message(mavlink_channel_t chan) const
     return true;
 }
 
-const AP_Logger::PID_Info& AP_Landing_Deepstall::get_pid_info(void) const
+const AP_PIDInfo& AP_Landing_Deepstall::get_pid_info(void) const
 {
     return ds_PID.get_pid_info();
 }
 
 void AP_Landing_Deepstall::Log(void) const {
-    const AP_Logger::PID_Info& pid_info = ds_PID.get_pid_info();
+    const AP_PIDInfo& pid_info = ds_PID.get_pid_info();
     struct log_DSTL pkt = {
         LOG_PACKET_HEADER_INIT(LOG_DSTL_MSG),
         time_us          : AP_HAL::micros64(),
@@ -467,7 +488,7 @@ bool AP_Landing_Deepstall::terminate(void) {
         landing.flags.in_progress = true;
         stage = DEEPSTALL_STAGE_LAND;
 
-        if(landing.ahrs.get_position(landing_point)) {
+        if(landing.ahrs.get_location(landing_point)) {
             build_approach_path(true);
         } else {
             hold_level = true;
@@ -580,7 +601,7 @@ bool AP_Landing_Deepstall::verify_breakout(const Location &current_loc, const Lo
     const Vector2f location_delta = current_loc.get_distance_NE(target_loc);
     const float heading_error = degrees(landing.ahrs.groundspeed_vector().angle(location_delta));
 
-    // Check to see if the the plane is heading toward the land waypoint. We use 20 degrees (+/-10 deg)
+    // Check to see if the plane is heading toward the land waypoint. We use 20 degrees (+/-10 deg)
     // of margin so that the altitude to be within 5 meters of desired
 
     if (heading_error <= 10.0  && fabsf(height_error) < DEEPSTALL_LOITER_ALT_TOLERANCE) {
@@ -593,7 +614,7 @@ bool AP_Landing_Deepstall::verify_breakout(const Location &current_loc, const Lo
 float AP_Landing_Deepstall::update_steering()
 {
     Location current_loc;
-    if ((!landing.ahrs.get_position(current_loc) || !landing.ahrs.healthy()) && !hold_level) {
+    if ((!landing.ahrs.get_location(current_loc) || !landing.ahrs.healthy()) && !hold_level) {
         // panic if no position source is available
         // continue the stall but target just holding the wings held level as deepstall should be a minimal
         // energy configuration on the aircraft, and if a position isn't available aborting would be worse
@@ -638,3 +659,5 @@ float AP_Landing_Deepstall::update_steering()
 
     return ds_PID.get_pid(error);
 }
+
+#endif  // HAL_LANDING_DEEPSTALL_ENABLED

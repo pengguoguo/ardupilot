@@ -16,6 +16,7 @@
 #include <AP_AHRS/AP_AHRS.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Math/AP_Math.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -31,6 +32,9 @@ extern const AP_HAL::HAL& hal;
     #define AP_OADATABASE_QUEUE_SIZE_DEFAULT 80
 #endif
 
+#ifndef AP_OADATABASE_DISTANCE_FROM_HOME
+    #define AP_OADATABASE_DISTANCE_FROM_HOME 3
+#endif
 
 const AP_Param::GroupInfo AP_OADatabase::var_info[] = {
 
@@ -91,6 +95,14 @@ const AP_Param::GroupInfo AP_OADatabase::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("DIST_MAX", 7, AP_OADatabase, _dist_max, 0.0f),
 
+    // @Param{Copter}: ALT_MIN
+    // @DisplayName: OADatabase minimum altitude above home before storing obstacles
+    // @Description: OADatabase will reject obstacle's if vehicle's altitude above home is below this parameter, in a 3 meter radius around home. Set 0 to disable this feature.
+    // @Units: m
+    // @Range: 0 4
+    // @User: Advanced
+    AP_GROUPINFO_FRAME("ALT_MIN", 8, AP_OADatabase, _min_alt, 0.0f, AP_PARAM_FRAME_COPTER | AP_PARAM_FRAME_HELI | AP_PARAM_FRAME_TRICOPTER),
+
     AP_GROUPEND
 };
 
@@ -131,12 +143,30 @@ void AP_OADatabase::update()
 }
 
 // push a location into the database
-void AP_OADatabase::queue_push(const Vector2f &pos, uint32_t timestamp_ms, float distance)
+void AP_OADatabase::queue_push(const Vector3f &pos, uint32_t timestamp_ms, float distance)
 {
     if (!healthy()) {
         return;
     }
 
+    // check if this obstacle needs to be rejected from DB because of low altitude near home
+#if APM_BUILD_COPTER_OR_HELI
+    if (!is_zero(_min_alt)) { 
+        Vector3f current_pos;
+        if (!AP::ahrs().get_relative_position_NED_home(current_pos)) {
+            // we do not know where the vehicle is
+            return;
+        }
+        if (current_pos.xy().length() < AP_OADATABASE_DISTANCE_FROM_HOME) {
+            // vehicle is within a small radius of home 
+            if (-current_pos.z < _min_alt) {
+                // vehicle is below the minimum alt
+                return;
+            }
+        }
+    }
+#endif
+    
     // ignore objects that are far away
     if ((_dist_max > 0.0f) && (distance > _dist_max)) {
         return;
@@ -157,6 +187,11 @@ void AP_OADatabase::init_queue()
     }
 
     _queue.items = new ObjectBuffer<OA_DbItem>(_queue.size);
+    if (_queue.items != nullptr && _queue.items->get_size() == 0) {
+        // allocation failed
+        delete _queue.items;
+        _queue.items = nullptr;
+    }
 }
 
 void AP_OADatabase::init_database()
@@ -341,12 +376,6 @@ void AP_OADatabase::send_adsb_vehicle(mavlink_channel_t chan, uint16_t interval_
         return;
     }
 
-    // use vehicle's current altitude
-    Location current_loc;
-    if (!AP::ahrs().get_position(current_loc)) {
-        current_loc.alt = 0;
-    }
-
     const uint8_t chan_as_bitmask = 1 << chan;
     const char callsign[9] = "OA_DB";
 
@@ -380,14 +409,14 @@ void AP_OADatabase::send_adsb_vehicle(mavlink_channel_t chan, uint16_t interval_
         }
 
         // convert object's position as an offset from EKF origin to Location
-        const Location item_loc(Vector3f(_database.items[idx].pos.x * 100.0f, _database.items[idx].pos.y * 100.0f, 0));
+        const Location item_loc(Vector3f(_database.items[idx].pos.x * 100.0f, _database.items[idx].pos.y * 100.0f, _database.items[idx].pos.z * 100.0f), Location::AltFrame::ABOVE_ORIGIN);
 
         mavlink_msg_adsb_vehicle_send(chan,
             idx,
             item_loc.lat,
             item_loc.lng,
             0,                          // altitude_type
-            current_loc.alt,            // use vehicle's current altitude
+            item_loc.alt,               
             0,                          // heading
             0,                          // hor_velocity
             0,                          // ver_velocity
@@ -451,5 +480,3 @@ AP_OADatabase *oadatabase()
 }
 
 }
-
-

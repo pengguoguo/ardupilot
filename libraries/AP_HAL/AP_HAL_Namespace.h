@@ -22,16 +22,23 @@ namespace AP_HAL {
     class AnalogIn;
     class Storage;
     class DigitalSource;
+    class PWMSource;
     class GPIO;
     class RCInput;
     class RCOutput;
     class Scheduler;
+    class EventHandle;
+    class EventSource;
     class Semaphore;
     class OpticalFlow;
+    class DSP;
 
-    class CANProtocol;
-    class CANManager;
-    class CANHal;
+    class QSPIDevice;
+    class QSPIDeviceDriver;
+    class QSPIDeviceManager;
+
+    class CANIface;
+    class CANFrame;
 
     class Util;
     class Flash;
@@ -57,6 +64,8 @@ namespace AP_HAL {
         // Devices using AP_HAL::SPIDevice abstraction
         SPIDevice_Type              = -1,
     };
+
+    class SIMState;
 
     // Must be implemented by the concrete HALs.
     const HAL& get_HAL();

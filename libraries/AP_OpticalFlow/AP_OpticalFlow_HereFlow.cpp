@@ -1,17 +1,15 @@
-#include <AP_HAL/AP_HAL.h>
-
-#if HAL_WITH_UAVCAN
-
 #include "AP_OpticalFlow_HereFlow.h"
 
-#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
+#if AP_OPTICALFLOW_HEREFLOW_ENABLED
+
+#include <AP_HAL/AP_HAL.h>
+
+#include <AP_CANManager/AP_CANManager.h>
 #include <AP_UAVCAN/AP_UAVCAN.h>
 
 #include <com/hex/equipment/flow/Measurement.hpp>
 
 extern const AP_HAL::HAL& hal;
-
-#define debug_flow_uavcan(level_debug, can_driver, fmt, args...) do { if ((level_debug) <= AP::can().get_debug_level_driver(can_driver)) { hal.console->printf(fmt, ##args); }} while (0)
 
 //UAVCAN Frontend Registry Binder
 UC_REGISTRY_BINDER(MeasurementCb, com::hex::equipment::flow::Measurement);
@@ -22,7 +20,7 @@ AP_UAVCAN* AP_OpticalFlow_HereFlow::_ap_uavcan = nullptr;
 /*
   constructor - registers instance at top Flow driver
  */
-AP_OpticalFlow_HereFlow::AP_OpticalFlow_HereFlow(OpticalFlow &flow) :
+AP_OpticalFlow_HereFlow::AP_OpticalFlow_HereFlow(AP_OpticalFlow &flow) :
     OpticalFlow_backend(flow)
 {
     if (_driver) {
@@ -85,7 +83,7 @@ void AP_OpticalFlow_HereFlow::_push_state(void)
     if (!new_data) {
         return;
     }
-    struct OpticalFlow::OpticalFlow_state state;
+    struct AP_OpticalFlow::OpticalFlow_state state;
     const Vector2f flowScaler = _flowScaler();
     //setup scaling based on parameters
     float flowScaleFactorX = 1.0f + 0.001f * flowScaler.x;
@@ -103,5 +101,4 @@ void AP_OpticalFlow_HereFlow::_push_state(void)
     new_data = false;
 }
 
-#endif // HAL_WITH_UAVCAN
-
+#endif // AP_OPTICALFLOW_HEREFLOW_ENABLED

@@ -9,7 +9,7 @@
 bool Sub::acro_init()
 {
     // set target altitude to zero for reporting
-    pos_control.set_alt_target(0);
+    pos_control.set_pos_target_z_cm(0);
 
     // attitude hold inputs become thrust inputs in acro mode
     // set to neutral to prevent chaotic behavior (esp. roll/pitch)
@@ -76,7 +76,7 @@ void Sub::get_pilot_desired_angle_rates(int16_t roll_in, int16_t pitch_in, int16
 
         // range check expo
         if (g.acro_expo > 1.0f) {
-            g.acro_expo = 1.0f;
+            g.acro_expo.set(1.0f);
         }
 
         // roll expo

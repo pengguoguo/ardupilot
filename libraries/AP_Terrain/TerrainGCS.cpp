@@ -18,14 +18,14 @@
 
 #include "AP_Terrain.h"
 
+#if AP_TERRAIN_AVAILABLE
+
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Common/AP_Common.h>
 #include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
 #include <GCS_MAVLink/GCS.h>
-
-#if AP_TERRAIN_AVAILABLE
 
 #include <assert.h>
 #include <stdio.h>
@@ -38,6 +38,10 @@ extern const AP_HAL::HAL& hal;
 bool AP_Terrain::request_missing(mavlink_channel_t chan, struct grid_cache &gcache)
 {
     struct grid_block &grid = gcache.grid;
+
+    if (options.get() & uint16_t(Options::DisableDownload)) {
+        return false;
+    }
 
     if (grid.spacing != grid_spacing) {
         // an invalid grid
@@ -81,6 +85,21 @@ bool AP_Terrain::request_missing(mavlink_channel_t chan, const struct grid_info 
 }
 
 /*
+  send any pending cache requests
+ */
+bool AP_Terrain::send_cache_request(mavlink_channel_t chan)
+{
+    for (uint16_t i=0; i<cache_size; i++) {
+        if (cache[i].state >= GRID_CACHE_VALID) {
+            if (request_missing(chan, cache[i])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/*
   send any pending terrain request to the GCS
  */
 void AP_Terrain::send_request(mavlink_channel_t chan)
@@ -94,8 +113,12 @@ void AP_Terrain::send_request(mavlink_channel_t chan)
     schedule_disk_io();
 
     Location loc;
-    if (!AP::ahrs().get_position(loc)) {
-        // we don't know where we are
+    if (!AP::ahrs().get_location(loc)) {
+        // we don't know where we are. Send a report and request any cached blocks.
+        // this allows for download of mission items when we have no GPS lock
+        loc = {};
+        send_terrain_report(chan, loc, true);
+        send_cache_request(chan);
         return;
     }
 
@@ -116,27 +139,12 @@ void AP_Terrain::send_request(mavlink_channel_t chan)
         return;
     }
 
-    // also request a larger set of up to 9 grids
-    for (int8_t x=-1; x<=1; x++) {
-        for (int8_t y=-1; y<=1; y++) {
-            Location loc2 = loc;
-            loc2.offset(x*TERRAIN_GRID_BLOCK_SIZE_X*0.7f*grid_spacing,
-                        y*TERRAIN_GRID_BLOCK_SIZE_Y*0.7f*grid_spacing);
-            struct grid_info info2;
-            calculate_grid_info(loc2, info2);            
-            if (request_missing(chan, info2)) {
-                return;
-            }
-        }
-    }
-
-    // check cache blocks that may have been setup by a TERRAIN_CHECK
-    for (uint16_t i=0; i<cache_size; i++) {
-        if (cache[i].state >= GRID_CACHE_VALID) {
-            if (request_missing(chan, cache[i])) {
-                return;
-            }
-        }
+    // check cache blocks that may have been setup by a TERRAIN_CHECK,
+    // mission items, rally items, squares surrounding our current
+    // location, favourite holiday destination, scripting, height
+    // reference location, ....
+    if (send_cache_request(chan)) {
+        return;
     }
 
     // request the current loc last to ensure it has highest last
@@ -208,28 +216,29 @@ void AP_Terrain::send_terrain_report(mavlink_channel_t chan, const Location &loc
     uint16_t spacing = 0;
     Location current_loc;
     const AP_AHRS &ahrs = AP::ahrs();
-    if (ahrs.get_position(current_loc) &&
-        height_amsl(ahrs.get_home(), home_terrain_height, false) &&
-        height_amsl(loc, terrain_height, false)) {
+    if (ahrs.get_location(current_loc) &&
+        height_amsl(ahrs.get_home(), home_terrain_height) &&
+        height_amsl(loc, terrain_height)) {
         // non-zero spacing indicates we have data
         spacing = grid_spacing;
     } else if (extrapolate && have_current_loc_height) {
         // show the extrapolated height, so logs show what height is
         // being used for navigation
         terrain_height = last_current_loc_height;
+    } else {
+        // report terrain height if we can, but can't give current_height
+        height_amsl(loc, terrain_height);
     }
     uint16_t pending, loaded;
     get_statistics(pending, loaded);
 
-    float current_height;
+    float current_height = 0.0f;
     if (spacing == 0 && !(extrapolate && have_current_loc_height)) {
         current_height = 0;
-    } else {
-        if (current_loc.relative_alt) {
-            current_height = current_loc.alt*0.01f;
-        } else {
-            current_height = (current_loc.alt - ahrs.get_home().alt)*0.01f;
-        }
+    } else if (!current_loc.is_zero()) {
+        int32_t height_above_home_cm = 0;
+        UNUSED_RESULT(current_loc.get_alt_cm(Location::AltFrame::ABOVE_HOME, height_above_home_cm));
+        current_height = height_above_home_cm * 0.01f;  // cm -> m
     }
     current_height += home_terrain_height - terrain_height;
 
@@ -263,8 +272,8 @@ void AP_Terrain::handle_terrain_data(const mavlink_message_t &msg)
 
     uint16_t i;
     for (i=0; i<cache_size; i++) {
-        if (cache[i].grid.lat == packet.lat && 
-            cache[i].grid.lon == packet.lon && 
+        if (TERRAIN_LATLON_EQUAL(cache[i].grid.lat,packet.lat) &&
+            TERRAIN_LATLON_EQUAL(cache[i].grid.lon,packet.lon) &&
             cache[i].grid.spacing == packet.grid_spacing &&
             grid_spacing == packet.grid_spacing &&
             packet.gridbit < 56) {

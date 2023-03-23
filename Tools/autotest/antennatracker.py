@@ -1,4 +1,9 @@
-#!/usr/bin/env python
+'''
+Test AntennaTracker vehicle in SITL
+
+AP_FLAKE8_CLEAN
+
+'''
 
 from __future__ import print_function
 
@@ -16,13 +21,18 @@ from common import NotAchievedException
 testdir = os.path.dirname(os.path.realpath(__file__))
 SITL_START_LOCATION = mavutil.location(-27.274439, 151.290064, 343, 8.7)
 
+
 class AutoTestTracker(AutoTest):
 
     def log_name(self):
         return "AntennaTracker"
 
+    def default_speedup(self):
+        '''Tracker seems to be race-free'''
+        return 100
+
     def test_filepath(self):
-         return os.path.realpath(__file__)
+        return os.path.realpath(__file__)
 
     def sitl_start_location(self):
         return SITL_START_LOCATION
@@ -35,6 +45,9 @@ class AutoTestTracker(AutoTest):
 
     def default_frame(self):
         return "tracker"
+
+    def set_current_test_name(self, name):
+        self.current_test_name_directory = "AntennaTracker_Tests/" + name + "/"
 
     def apply_defaultfile_parameters(self):
         # tracker doesn't have a default parameters file
@@ -71,9 +84,7 @@ class AutoTestTracker(AutoTest):
                     0, # pitch rate
                     0, # yaw rate
                     0) # thrust, 0 to 1, translated to a climb/descent rate
-            m = self.mav.recv_match(type='ATTITUDE', blocking=True, timeout=2)
-            if m is None:
-                raise NotAchievedException("Did not get ATTITUDE")
+            m = self.assert_receive_message('ATTITUDE', timeout=2)
             if now - last_debug > 1:
                 last_debug = now
                 self.progress("yaw=%f desyaw=%f pitch=%f despitch=%f" %
@@ -85,20 +96,28 @@ class AutoTestTracker(AutoTest):
                 self.progress("Achieved attitude")
                 break
 
+    def reboot_sitl(self, *args, **kwargs):
+        self.disarm_vehicle()
+        super(AutoTestTracker, self).reboot_sitl(*args, **kwargs)
+
     def GUIDED(self):
+        '''Test GUIDED mode'''
+        self.reboot_sitl() # temporary hack around control issues
         self.change_mode(4) # "GUIDED"
         self.achieve_attitude(desyaw=10, despitch=30)
         self.achieve_attitude(desyaw=0, despitch=0)
         self.achieve_attitude(desyaw=45, despitch=10)
 
     def MANUAL(self):
+        '''Test MANUAL mode'''
         self.change_mode(0) # "MANUAL"
         for chan in 1, 2:
             for pwm in 1200, 1600, 1367:
-                self.set_rc(chan, pwm);
+                self.set_rc(chan, pwm)
                 self.wait_servo_channel_value(chan, pwm)
 
     def SERVOTEST(self):
+        '''Test SERVOTEST mode'''
         self.change_mode(0) # "MANUAL"
         # magically changes to SERVOTEST (3)
         for value in 1900, 1200:
@@ -127,6 +146,7 @@ class AutoTestTracker(AutoTest):
             self.wait_servo_channel_value(channel, value)
 
     def SCAN(self):
+        '''Test SCAN mode'''
         self.change_mode(2) # "SCAN"
         self.set_parameter("SCAN_SPEED_YAW", 20)
         for channel in 1, 2:
@@ -143,31 +163,17 @@ class AutoTestTracker(AutoTest):
     def disabled_tests(self):
         return {
             "ArmFeatures": "See https://github.com/ArduPilot/ardupilot/issues/10652",
-            "Parameters": "reboot does not work",
+            "CPUFailsafe": " tracker doesn't have a CPU failsafe",
         }
 
     def tests(self):
         '''return list of all tests'''
         ret = super(AutoTestTracker, self).tests()
         ret.extend([
-            ("GUIDED",
-             "Test GUIDED mode",
-             self.GUIDED),
-
-            ("MANUAL",
-             "Test MANUAL mode",
-             self.MANUAL),
-
-            ("SERVOTEST",
-             "Test SERVOTEST mode",
-             self.SERVOTEST),
-
-            ("NMEAOutput",
-             "Test AHRS NMEA Output can be read by out NMEA GPS",
-             self.nmea_output),
-
-            ("SCAN",
-             "Test SCAN mode",
-             self.SCAN),
+            self.GUIDED,
+            self.MANUAL,
+            self.SERVOTEST,
+            self.NMEAOutput,
+            self.SCAN,
         ])
         return ret

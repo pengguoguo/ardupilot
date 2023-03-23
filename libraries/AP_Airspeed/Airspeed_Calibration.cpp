@@ -6,14 +6,12 @@
  */
 
 #include <AP_Common/AP_Common.h>
-#include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Baro/AP_Baro.h>
 
 #include "AP_Airspeed.h"
 
-extern const AP_HAL::HAL& hal;
 
 // constructor - fill in all the initial values
 Airspeed_Calibration::Airspeed_Calibration()
@@ -84,7 +82,7 @@ float Airspeed_Calibration::update(float airspeed, const Vector3f &vg, int16_t m
     state += KG*(TAS_mea - TAS_pred); // [3 x 1] + [3 x 1] * [1 x 1]
 
     // Update the covariance matrix
-    Vector3f HP2 = H_TAS * P;
+    Vector3f HP2 = H_TAS.row_times_mat(P);
     P -= KG.mul_rowcol(HP2);
 
     // force symmetry on the covariance matrix - necessary due to rounding
@@ -115,7 +113,7 @@ float Airspeed_Calibration::update(float airspeed, const Vector3f &vg, int16_t m
 void AP_Airspeed::update_calibration(uint8_t i, const Vector3f &vground, int16_t max_airspeed_allowed_during_cal)
 {
 #if AP_AIRSPEED_AUTOCAL_ENABLE
-    if (!param[i].autocal) {
+    if (!param[i].autocal && !calibration_enabled) {
         // auto-calibration not enabled
         return;
     }
@@ -128,7 +126,7 @@ void AP_Airspeed::update_calibration(uint8_t i, const Vector3f &vground, int16_t
     state[i].calibration.state.z = 1.0f / sqrtf(ratio);
 
     // calculate true airspeed, assuming a airspeed ratio of 1.0
-    float dpress = MAX(get_differential_pressure(), 0);
+    float dpress = MAX(get_differential_pressure(i), 0);
     float true_airspeed = sqrtf(dpress) * AP::baro().get_EAS2TAS();
 
     float zratio = state[i].calibration.update(true_airspeed, vground, max_airspeed_allowed_during_cal);
@@ -146,6 +144,7 @@ void AP_Airspeed::update_calibration(uint8_t i, const Vector3f &vground, int16_t
             param[i].ratio.save();
             state[i].last_saved_ratio = param[i].ratio;
             state[i].counter = 0;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Airspeed %u ratio reset: %f", i , static_cast<double> (param[i].ratio));
         }
     } else {
         state[i].counter++;

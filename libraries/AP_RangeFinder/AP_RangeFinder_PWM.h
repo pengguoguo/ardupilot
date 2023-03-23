@@ -17,6 +17,14 @@
 #include "AP_RangeFinder.h"
 #include "AP_RangeFinder_Backend.h"
 
+#ifndef AP_RANGEFINDER_PWM_ENABLED
+#define AP_RANGEFINDER_PWM_ENABLED        \
+    (CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS &&   \
+     AP_RANGEFINDER_BACKEND_DEFAULT_ENABLED)
+#endif
+
+#if AP_RANGEFINDER_PWM_ENABLED
+
 class AP_RangeFinder_PWM : public AP_RangeFinder_Backend
 {
 public:
@@ -36,7 +44,7 @@ public:
 
 protected:
 
-    bool get_reading(uint16_t &reading_cm);
+    bool get_reading(float &reading_m);
 
     MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_UNKNOWN;
@@ -44,19 +52,12 @@ protected:
 
 private:
 
-    int8_t last_pin; // last pin used for reading pwm (used to recognise change in pin assignment)
-
-    // the following three members are updated by the interrupt handler
-    uint32_t irq_value_us;         // some of calculated pwm values (irq copy)
-    uint16_t irq_sample_count;     // number of pwm values in irq_value_us (irq copy)
-    uint32_t irq_pulse_start_us;   // system time of start of pulse
-
-    void irq_handler(uint8_t pin, bool pin_high, uint32_t timestamp_us);
-
-    void check_pin();
+    bool check_pin();
     void check_stop_pin();
-    void check_pins();
+    bool check_pins();
     uint8_t last_stop_pin = -1;
+
+    AP_HAL::PWMSource pwm_source;
 
     float &estimated_terrain_height;
 
@@ -65,3 +66,5 @@ private:
     bool was_out_of_range = -1; // this odd initialisation ensures we transition to new state
 
 };
+
+#endif  // AP_RANGEFINDER_PWM_ENABLED

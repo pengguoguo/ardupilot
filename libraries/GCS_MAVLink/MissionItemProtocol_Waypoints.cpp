@@ -65,11 +65,14 @@ MAV_MISSION_RESULT MissionItemProtocol_Waypoints::get_item(const GCS_MAVLINK &_l
     if (packet.seq != 0 && // always allow HOME to be read
         packet.seq >= mission.num_commands()) {
         // try to educate the GCS on the actual size of the mission:
-        mavlink_msg_mission_count_send(_link.get_chan(),
-                                       msg.sysid,
-                                       msg.compid,
-                                       mission.num_commands(),
-                                       MAV_MISSION_TYPE_MISSION);
+        const mavlink_channel_t chan = _link.get_chan();
+        if (HAVE_PAYLOAD_SPACE(chan, MISSION_COUNT)) {
+            mavlink_msg_mission_count_send(chan,
+                                           msg.sysid,
+                                           msg.compid,
+                                           mission.num_commands(),
+                                           MAV_MISSION_TYPE_MISSION);
+        }
         return MAV_MISSION_ERROR;
     }
 
@@ -93,8 +96,6 @@ MAV_MISSION_RESULT MissionItemProtocol_Waypoints::get_item(const GCS_MAVLINK &_l
 
     // set auto continue to 1
     ret_packet.autocontinue = 1;     // 1 (true), 0 (false)
-
-    ret_packet.command = cmd.id;
 
     return MAV_MISSION_ACCEPTED;
 }

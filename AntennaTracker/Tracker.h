@@ -1,7 +1,7 @@
 /*
    Lead developers: Matthew Ridley and Andrew Tridgell
 
-   Please contribute your ideas! See https://dev.ardupilot.org for details
+   Please contribute your ideas! See https://ardupilot.org/dev for details
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -27,7 +27,6 @@
 #include <stdio.h>
 
 #include <AP_Common/AP_Common.h>
-#include <AP_HAL/AP_HAL.h>
 #include <AP_Param/AP_Param.h>
 #include <AP_Math/AP_Math.h>        // ArduPilot Mega Vector/Matrix math Library
 #include <AP_AHRS/AP_AHRS.h>         // ArduPilot Mega DCM Library
@@ -38,11 +37,11 @@
 #include <AP_NavEKF2/AP_NavEKF2.h>
 #include <AP_NavEKF3/AP_NavEKF3.h>
 
+#include <SRV_Channel/SRV_Channel.h>
 #include <AP_Vehicle/AP_Vehicle.h>
 #include <AP_Mission/AP_Mission.h>
 #include <AP_Stats/AP_Stats.h>                      // statistics library
 #include <AP_BattMonitor/AP_BattMonitor.h> // Battery monitor library
-#include <AP_Common/AP_FWVersion.h>
 
 // Configuration
 #include "config.h"
@@ -53,12 +52,10 @@
 #include "GCS_Mavlink.h"
 #include "GCS_Tracker.h"
 
-#ifdef ENABLE_SCRIPTING
-#include <AP_Scripting/AP_Scripting.h>
-#endif
+#include "AP_Arming.h"
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-#include <SITL/SITL.h>
+#if AP_SCRIPTING_ENABLED
+#include <AP_Scripting/AP_Scripting.h>
 #endif
 
 #include "mode.h"
@@ -74,26 +71,16 @@ public:
 
     Tracker(void);
 
-    static const AP_FWVersion fwver;
-
-    // HAL::Callbacks implementation.
-    void setup() override;
-    void loop() override;
+    void arm_servos();
+    void disarm_servos();
 
 private:
     Parameters g;
-
-    // main loop scheduler
-    AP_Scheduler scheduler;
 
     uint32_t start_time_ms = 0;
 
     AP_Logger logger;
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    SITL::SITL sitl;
-#endif
-    
     /**
        antenna control channels
     */
@@ -115,7 +102,7 @@ private:
     AP_BattMonitor battery{MASK_LOG_CURRENT,
                            FUNCTOR_BIND_MEMBER(&Tracker::handle_battery_failsafe, void, const char*, const int8_t),
                            nullptr};
-    struct Location current_loc;
+    Location current_loc;
 
     Mode *mode_from_mode_num(enum Mode::Number num);
 
@@ -129,7 +116,7 @@ private:
     ModeServoTest mode_servotest;
     ModeStop mode_stop;
 
-#ifdef ENABLE_SCRIPTING
+#if AP_SCRIPTING_ENABLED
     AP_Scripting scripting;
 #endif
 
@@ -171,10 +158,10 @@ private:
     static const AP_Param::Info var_info[];
     static const struct LogStructure log_structure[];
 
-    // true if the compass's initial location has been set
-    bool compass_init_location;
-
-    // AntennaTracker.cpp
+    // Tracker.cpp
+    void get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
+                             uint8_t &task_count,
+                             uint32_t &log_bit) override;
     void one_second_loop();
     void ten_hz_logging_loop();
     void stats_update();
@@ -190,7 +177,7 @@ private:
     void log_init(void);
 
     // Parameters.cpp
-    void load_parameters(void);
+    void load_parameters(void) override;
 
     // radio.cpp
     void read_radio();
@@ -199,7 +186,6 @@ private:
     void update_ahrs();
     void compass_save();
     void update_compass(void);
-    void accel_cal_update(void);
     void update_GPS(void);
     void handle_battery_failsafe(const char* type_str, const int8_t action);
 
@@ -207,20 +193,18 @@ private:
     void init_servos();
     void update_pitch_servo(float pitch);
     void update_pitch_position_servo(void);
-    void update_pitch_onoff_servo(float pitch);
+    void update_pitch_onoff_servo(float pitch) const;
     void update_pitch_cr_servo(float pitch);
     void update_yaw_servo(float yaw);
     void update_yaw_position_servo(void);
-    void update_yaw_onoff_servo(float yaw);
+    void update_yaw_onoff_servo(float yaw) const;
     void update_yaw_cr_servo(float yaw);
 
     // system.cpp
-    void init_tracker();
-    bool get_home_eeprom(struct Location &loc);
+    void init_ardupilot() override;
+    bool get_home_eeprom(Location &loc) const;
     bool set_home_eeprom(const Location &temp) WARN_IF_UNUSED;
     bool set_home(const Location &temp) WARN_IF_UNUSED;
-    void arm_servos();
-    void disarm_servos();
     void prepare_servos();
     void set_mode(Mode &newmode, ModeReason reason);
     bool set_mode(uint8_t new_mode, ModeReason reason) override;
@@ -238,7 +222,11 @@ private:
     void tracking_update_position(const mavlink_global_position_int_t &msg);
     void tracking_update_pressure(const mavlink_scaled_pressure_t &msg);
     void tracking_manual_control(const mavlink_manual_control_t &msg);
-    void update_armed_disarmed();
+    void update_armed_disarmed() const;
+    bool get_pan_tilt_norm(float &pan_norm, float &tilt_norm) const override;
+
+    // Arming/Disarming management class
+    AP_Arming_Tracker arming;
 
     // Mission library
     AP_Mission mission{

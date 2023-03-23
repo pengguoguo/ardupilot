@@ -17,6 +17,8 @@
  */
 #include "AP_Compass_MMC3416.h"
 
+#if AP_COMPASS_MMC3416_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include <utility>
 #include <AP_Math/AP_Math.h>
@@ -90,7 +92,12 @@ bool AP_Compass_MMC3416::init()
     dev->get_semaphore()->give();
 
     /* register the compass instance in the frontend */
-    compass_instance = register_compass();
+    dev->set_device_type(DEVTYPE_MMC3416);
+    if (!register_compass(dev->get_bus_id(), compass_instance)) {
+        return false;
+    }
+    
+    set_dev_id(compass_instance, dev->get_bus_id());
 
     printf("Found a MMC3416 on 0x%x as compass %u\n", dev->get_bus_id(), compass_instance);
     
@@ -100,9 +107,6 @@ bool AP_Compass_MMC3416::init()
         set_external(compass_instance, true);
     }
     
-    dev->set_device_type(DEVTYPE_MMC3416);
-    set_dev_id(compass_instance, dev->get_bus_id());
-
     dev->set_retries(1);
     
     // call timer() at 100Hz
@@ -222,6 +226,15 @@ void AP_Compass_MMC3416::timer()
         }
 
 #if 0
+// @LoggerMessage: MMO
+// @Description: MMC3416 compass data
+// @Field: TimeUS: Time since system startup
+// @Field: Nx: new measurement X axis
+// @Field: Ny: new measurement Y axis
+// @Field: Nz: new measurement Z axis
+// @Field: Ox: new offset X axis
+// @Field: Oy: new offset Y axis
+// @Field: Oz: new offset Z axis
         AP::logger().Write("MMO", "TimeUS,Nx,Ny,Nz,Ox,Oy,Oz", "Qffffff",
                                                AP_HAL::micros64(),
                                                (double)new_offset.x,
@@ -236,6 +249,10 @@ void AP_Compass_MMC3416::timer()
 #endif
 
         last_sample_ms = AP_HAL::millis();
+
+        // sensor is not FRD
+        field.y = -field.y;
+
         accumulate_sample(field, compass_instance);
 
         if (!dev->write_register(REG_CONTROL0, REG_CONTROL0_TM)) {
@@ -262,6 +279,9 @@ void AP_Compass_MMC3416::timer()
         field *= -counts_to_milliGauss;
         field += offset;
 
+        // sensor is not FRD
+        field.y = -field.y;
+
         last_sample_ms = AP_HAL::millis();
         accumulate_sample(field, compass_instance);
 
@@ -283,3 +303,5 @@ void AP_Compass_MMC3416::read()
 {
     drain_accumulated_samples(compass_instance);
 }
+
+#endif  // AP_COMPASS_MMC3416_ENABLED

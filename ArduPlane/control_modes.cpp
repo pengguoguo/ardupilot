@@ -1,5 +1,8 @@
 #include "Plane.h"
 
+#include "quadplane.h"
+#include "qautotune.h"
+
 Mode *Plane::mode_from_mode_num(const enum Mode::Number num)
 {
     Mode *ret = nullptr;
@@ -41,14 +44,18 @@ Mode *Plane::mode_from_mode_num(const enum Mode::Number num)
         ret = &mode_loiter;
         break;
     case Mode::Number::AVOID_ADSB:
+#if HAL_ADSB_ENABLED
         ret = &mode_avoidADSB;
         break;
+#endif
+    // if ADSB is not compiled in then fallthrough to guided
     case Mode::Number::GUIDED:
         ret = &mode_guided;
         break;
     case Mode::Number::INITIALISING:
         ret = &mode_initializing;
         break;
+#if HAL_QUADPLANE_ENABLED
     case Mode::Number::QSTABILIZE:
         ret = &mode_qstabilize;
         break;
@@ -67,12 +74,26 @@ Mode *Plane::mode_from_mode_num(const enum Mode::Number num)
     case Mode::Number::QACRO:
         ret = &mode_qacro;
         break;
+#if QAUTOTUNE_ENABLED
     case Mode::Number::QAUTOTUNE:
         ret = &mode_qautotune;
         break;
+#endif
+#endif  // HAL_QUADPLANE_ENABLED
     case Mode::Number::TAKEOFF:
         ret = &mode_takeoff;
         break;
+    case Mode::Number::THERMAL:
+#if HAL_SOARING_ENABLED
+        ret = &mode_thermal;
+#endif
+        break;
+#if HAL_QUADPLANE_ENABLED
+    case Mode::Number::LOITER_ALT_QLAND:
+        ret = &mode_loiter_qland;
+        break;
+#endif  // HAL_QUADPLANE_ENABLED
+
     }
     return ret;
 }
@@ -86,9 +107,8 @@ void Plane::read_control_switch()
     // If we get this value we do not want to change modes.
     if(switchPosition == 255) return;
 
-    if (failsafe.rc_failsafe || failsafe.throttle_counter > 0) {
-        // when we are in rc_failsafe mode then RC input is not
-        // working, and we need to ignore the mode switch channel
+    if (!rc().has_valid_input()) {
+        // ignore the mode switch channel if there is no valid RC input
         return;
     }
 
@@ -97,15 +117,7 @@ void Plane::read_control_switch()
         return;
     }
 
-    // we look for changes in the switch position. If the
-    // RST_SWITCH_CH parameter is set, then it is a switch that can be
-    // used to force re-reading of the control switch. This is useful
-    // when returning to the previous mode after a failsafe or fence
-    // breach. This channel is best used on a momentary switch (such
-    // as a spring loaded trainer switch).
-    if (oldSwitchPosition != switchPosition ||
-        (g.reset_switch_chan != 0 &&
-         RC_Channels::get_radio_in(g.reset_switch_chan-1) > RESET_SWITCH_CHAN_PWM)) {
+    if (oldSwitchPosition != switchPosition) {
 
         if (switch_debouncer == false) {
             // this ensures that mode switches only happen if the
@@ -121,24 +133,11 @@ void Plane::read_control_switch()
         oldSwitchPosition = switchPosition;
     }
 
-    if (g.reset_mission_chan != 0 &&
-        RC_Channels::get_radio_in(g.reset_mission_chan-1) > RESET_SWITCH_CHAN_PWM) {
-        mission.start();
-        prev_WP_loc = current_loc;
-    }
-
     switch_debouncer = false;
 
-#if PARACHUTE == ENABLED
-    if (g.parachute_channel > 0) {
-        if (RC_Channels::get_radio_in(g.parachute_channel-1) >= 1700) {
-            parachute_manual_release();
-        }
-    }
-#endif
 }
 
-uint8_t Plane::readSwitch(void)
+uint8_t Plane::readSwitch(void) const
 {
     uint16_t pulsewidth = RC_Channels::get_radio_in(g.flight_mode_channel - 1);
     if (pulsewidth <= 900 || pulsewidth >= 2200) return 255;            // This is an error condition
@@ -161,8 +160,25 @@ void Plane::reset_control_switch()
  */
 void Plane::autotune_start(void)
 {
-    rollController.autotune_start();
-    pitchController.autotune_start();
+    const bool tune_roll = g2.axis_bitmask.get() & int8_t(AutoTuneAxis::ROLL);
+    const bool tune_pitch = g2.axis_bitmask.get() & int8_t(AutoTuneAxis::PITCH);
+    const bool tune_yaw = g2.axis_bitmask.get() & int8_t(AutoTuneAxis::YAW);
+    if (tune_roll || tune_pitch || tune_yaw) {
+        gcs().send_text(MAV_SEVERITY_INFO, "Started autotune");
+        if (tune_roll) { 
+            rollController.autotune_start();
+        }
+        if (tune_pitch) { 
+            pitchController.autotune_start();
+        }
+        if (tune_yaw) { 
+            yawController.autotune_start();
+        }
+        autotuning = true;
+        gcs().send_text(MAV_SEVERITY_INFO, "Autotuning %s%s%s", tune_roll?"roll ":"", tune_pitch?"pitch ":"", tune_yaw?"yaw":"");
+    } else {
+        gcs().send_text(MAV_SEVERITY_INFO, "No axis selected for tuning!");
+    }        
 }
 
 /*
@@ -172,6 +188,11 @@ void Plane::autotune_restore(void)
 {
     rollController.autotune_restore();
     pitchController.autotune_restore();
+    yawController.autotune_restore();
+    if (autotuning) {
+        autotuning = false;
+        gcs().send_text(MAV_SEVERITY_INFO, "Stopped autotune");
+    }
 }
 
 /*

@@ -22,6 +22,7 @@
 #include <AP_Rally/AP_Rally.h>
 #include <GCS_MAVLink/GCS.h>
 
+#if HAL_RALLY_ENABLED
 
 MAV_MISSION_RESULT MissionItemProtocol_Rally::append_item(const mavlink_mission_item_int_t &cmd)
 {
@@ -66,21 +67,25 @@ MAV_MISSION_RESULT MissionItemProtocol_Rally::convert_MISSION_ITEM_INT_to_RallyL
     if (cmd.z < INT16_MIN || cmd.z > INT16_MAX) {
         return MAV_MISSION_INVALID_PARAM7;
     }
+    ret = {};
     ret.lat = cmd.x;
     ret.lng = cmd.y;
     ret.alt = cmd.z;
     return MAV_MISSION_ACCEPTED;
 }
 
-MAV_MISSION_RESULT MissionItemProtocol_Rally::get_item(const GCS_MAVLINK &_link,
-                                                       const mavlink_message_t &msg,
-                                                       const mavlink_mission_request_int_t &packet,
-                                                       mavlink_mission_item_int_t &ret_packet)
+/*
+  static function to get rally item as mavlink_mission_item_int_t
+ */
+bool MissionItemProtocol_Rally::get_item_as_mission_item(uint16_t seq,
+                                                         mavlink_mission_item_int_t &ret_packet)
 {
+    auto *rallyp = AP::rally();
+
     RallyLocation rallypoint;
 
-    if (!rally.get_rally_point_with_index(packet.seq, rallypoint)) {
-        return MAV_MISSION_INVALID_SEQUENCE;
+    if (rallyp == nullptr || !rallyp->get_rally_point_with_index(seq, rallypoint)) {
+        return false;
     }
 
     ret_packet.frame = MAV_FRAME_GLOBAL_RELATIVE_ALT;
@@ -89,6 +94,17 @@ MAV_MISSION_RESULT MissionItemProtocol_Rally::get_item(const GCS_MAVLINK &_link,
     ret_packet.y = rallypoint.lng;
     ret_packet.z = rallypoint.alt;
 
+    return true;
+}
+
+MAV_MISSION_RESULT MissionItemProtocol_Rally::get_item(const GCS_MAVLINK &_link,
+                                                       const mavlink_message_t &msg,
+                                                       const mavlink_mission_request_int_t &packet,
+                                                       mavlink_mission_item_int_t &ret_packet)
+{
+    if (!get_item_as_mission_item(packet.seq, ret_packet)) {
+        return MAV_MISSION_INVALID_SEQUENCE;
+    }
     return MAV_MISSION_ACCEPTED;
 }
 
@@ -122,3 +138,5 @@ void MissionItemProtocol_Rally::truncate(const mavlink_mission_count_t &packet)
 {
     rally.truncate(packet.count);
 }
+
+#endif  // HAL_RALLY_ENABLED

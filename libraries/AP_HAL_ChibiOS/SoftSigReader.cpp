@@ -15,6 +15,7 @@
  * Code by Andrew Tridgell and Siddharth Bharat Purohit
  */
 
+#include <hal.h>
 #include "SoftSigReader.h"
 #include "hwdef/common/stm32_util.h"
 
@@ -89,6 +90,12 @@ bool SoftSigReader::attach_capture_timer(ICUDriver* icu_drv, icuchannel_t chan, 
     //Start Timer
     icuStartCapture(_icu_drv);
     return true;
+}
+
+void SoftSigReader::disable(void)
+{
+    icuStopCapture(_icu_drv);
+    dmaStreamDisable(dma);
 }
 
 void SoftSigReader::_irq_handler(void* self, uint32_t flags)

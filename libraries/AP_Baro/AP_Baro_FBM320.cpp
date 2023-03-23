@@ -18,8 +18,11 @@
 
 #include "AP_Baro_FBM320.h"
 
+#if AP_BARO_FBM320_ENABLED
+
 #include <utility>
 #include <stdio.h>
+#include <AP_Math/definitions.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -125,6 +128,9 @@ bool AP_Baro_FBM320::init()
 
     instance = _frontend.register_sensor();
 
+    dev->set_device_type(DEVTYPE_BARO_FBM320);
+    set_bus_id(instance, dev->get_bus_id());
+    
     dev->get_semaphore()->give();
 
     // request 50Hz update
@@ -218,3 +224,5 @@ void AP_Baro_FBM320::update(void)
     temperature_sum = 0;
     count=0;
 }
+
+#endif  // AP_BARO_FBM320_ENABLED

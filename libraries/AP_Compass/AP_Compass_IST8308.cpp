@@ -16,6 +16,8 @@
  */
 #include "AP_Compass_IST8308.h"
 
+#if AP_COMPASS_IST8308_ENABLED
+
 #include <stdio.h>
 #include <utility>
 
@@ -158,15 +160,17 @@ bool AP_Compass_IST8308::init()
 
     _dev->get_semaphore()->give();
 
-    _instance = register_compass();
+    //register compass instance
+    _dev->set_device_type(DEVTYPE_IST8308);
+    if (!register_compass(_dev->get_bus_id(), _instance)) {
+        return false;
+    }
+    set_dev_id(_instance, _dev->get_bus_id());
 
     printf("%s found on bus %u id %u address 0x%02x\n", name,
            _dev->bus_num(), _dev->get_bus_id(), _dev->get_bus_address());
 
     set_rotation(_instance, _rotation);
-
-    _dev->set_device_type(DEVTYPE_IST8308);
-    set_dev_id(_instance, _dev->get_bus_id());
 
     if (_force_external) {
         set_external(_instance, true);
@@ -174,8 +178,6 @@ bool AP_Compass_IST8308::init()
 
     _dev->register_periodic_callback(SAMPLING_PERIOD_USEC,
                                      FUNCTOR_BIND_MEMBER(&AP_Compass_IST8308::timer, void));
-
-    _perf_xfer_err = hal.util->perf_alloc(AP_HAL::Util::PC_COUNT, "IST8308_xfer_err");
 
     return true;
 
@@ -195,7 +197,6 @@ void AP_Compass_IST8308::timer()
 
     if (!_dev->read_registers(STAT1_REG, &stat, 1) ||
         !(stat & STAT1_VAL_DRDY)) {
-        hal.util->perf_count(_perf_xfer_err);
         return;
     }
 
@@ -205,7 +206,6 @@ void AP_Compass_IST8308::timer()
 
     if (!_dev->read_registers(DATAX_L_REG, (uint8_t *) &buffer,
                               sizeof(buffer))) {
-        hal.util->perf_count(_perf_xfer_err);
         return;
     }
 
@@ -226,3 +226,5 @@ void AP_Compass_IST8308::read()
 {
     drain_accumulated_samples(_instance);
 }
+
+#endif  // AP_COMPASS_IST8308_ENABLED

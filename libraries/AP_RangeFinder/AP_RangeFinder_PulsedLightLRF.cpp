@@ -14,6 +14,8 @@
  */
 #include "AP_RangeFinder_PulsedLightLRF.h"
 
+#if AP_RANGEFINDER_PULSEDLIGHTLRF_ENABLED
+
 #include <utility>
 #include <stdio.h>
 
@@ -40,11 +42,6 @@ extern const AP_HAL::HAL& hal;
 // i2c address
 #define LL40LS_ADDR   0x62
 
-/*
-   The constructor also initializes the rangefinder. Note that this
-   constructor is not called until detect() returns true, so we
-   already know that we should setup the rangefinder
-*/
 AP_RangeFinder_PulsedLightLRF::AP_RangeFinder_PulsedLightLRF(uint8_t bus,
                                                              RangeFinder::RangeFinder_State &_state,
                                                              AP_RangeFinder_Params &_params,
@@ -96,7 +93,7 @@ void AP_RangeFinder_PulsedLightLRF::timer(void)
             uint16_t _distance_cm = be16toh(val);
             // remove momentary spikes
             if (abs(_distance_cm - last_distance_cm) < 100) {
-                state.distance_cm = _distance_cm;
+                state.distance_m = _distance_cm * 0.01f;
                 state.last_reading_ms = AP_HAL::millis();
                 update_status();                
             }
@@ -223,3 +220,4 @@ failed:
     return false;
 }
 
+#endif  // AP_RANGEFINDER_PULSEDLIGHTLRF_ENABLED

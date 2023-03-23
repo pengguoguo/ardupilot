@@ -14,28 +14,30 @@
  *
  * Author: Eugene Shamaev, Siddharth Bharat Purohit
  */
-#ifndef AP_UAVCAN_H_
-#define AP_UAVCAN_H_
+#pragma once
+
+#include <AP_HAL/AP_HAL.h>
+
+#if HAL_ENABLE_LIBUAVCAN_DRIVERS
 
 #include <uavcan/uavcan.hpp>
-#include "AP_UAVCAN_DNA_Server.h"
-
-#include <AP_HAL/CAN.h>
+#include "AP_UAVCAN_IfaceMgr.h"
+#include "AP_UAVCAN_Clock.h"
+#include <AP_CANManager/AP_CANManager.h>
 #include <AP_HAL/Semaphores.h>
 #include <AP_Param/AP_Param.h>
+#include <AP_ESC_Telem/AP_ESC_Telem_Backend.h>
+#include <uavcan/protocol/param/GetSet.hpp>
+#include <uavcan/protocol/param/ExecuteOpcode.hpp>
+#include <SRV_Channel/SRV_Channel_config.h>
 
-#include <uavcan/helpers/heap_based_pool_allocator.hpp>
-
-#ifndef UAVCAN_NODE_POOL_SIZE
-#define UAVCAN_NODE_POOL_SIZE 8192
-#endif
-
-#ifndef UAVCAN_NODE_POOL_BLOCK_SIZE
-#define UAVCAN_NODE_POOL_BLOCK_SIZE 64
-#endif
 
 #ifndef UAVCAN_SRV_NUMBER
-#define UAVCAN_SRV_NUMBER 18
+#define UAVCAN_SRV_NUMBER NUM_SERVO_CHANNELS
+#endif
+
+#ifndef AP_DRONECAN_SEND_GPS
+#define AP_DRONECAN_SEND_GPS (BOARD_FLASH_SIZE > 1024)
 #endif
 
 #define AP_UAVCAN_SW_VERS_MAJOR 1
@@ -50,22 +52,58 @@
 class ButtonCb;
 class TrafficReportCb;
 class ActuatorStatusCb;
+class ActuatorStatusVolzCb;
 class ESCStatusCb;
+class DebugCb;
+class ParamGetSetCb;
+class ParamExecuteOpcodeCb;
+class AP_PoolAllocator;
+class AP_UAVCAN_DNA_Server;
+
+#if defined(__GNUC__) && (__GNUC__ > 8)
+#define DISABLE_W_CAST_FUNCTION_TYPE_PUSH \
+    _Pragma("GCC diagnostic push") \
+    _Pragma("GCC diagnostic ignored \"-Wcast-function-type\"")
+#define DISABLE_W_CAST_FUNCTION_TYPE_POP \
+    _Pragma("GCC diagnostic pop")
+#else
+#define DISABLE_W_CAST_FUNCTION_TYPE_PUSH
+#define DISABLE_W_CAST_FUNCTION_TYPE_POP
+#endif
+#if defined(__GNUC__) && (__GNUC__ >= 11)
+#define DISABLE_W_CAST_FUNCTION_TYPE_WITH_VOID (void*)
+#else
+#define DISABLE_W_CAST_FUNCTION_TYPE_WITH_VOID
+#endif
 
 /*
     Frontend Backend-Registry Binder: Whenever a message of said DataType_ from new node is received,
-    the Callback will invoke registery to register the node as separate backend.
+    the Callback will invoke registry to register the node as separate backend.
 */
 #define UC_REGISTRY_BINDER(ClassName_, DataType_) \
-	class ClassName_ : public AP_UAVCAN::RegistryBinder<DataType_> { \
+    class ClassName_ : public AP_UAVCAN::RegistryBinder<DataType_> { \
         typedef void (*CN_Registry)(AP_UAVCAN*, uint8_t, const ClassName_&); \
-	    public: \
-	        ClassName_() : RegistryBinder() {} \
-	        ClassName_(AP_UAVCAN* uc,  CN_Registry ffunc) : \
-				RegistryBinder(uc, (Registry)ffunc) {} \
-	}
+        public: \
+            ClassName_() : RegistryBinder() {} \
+            DISABLE_W_CAST_FUNCTION_TYPE_PUSH \
+            ClassName_(AP_UAVCAN* uc,  CN_Registry ffunc) : \
+                RegistryBinder(uc, (Registry)DISABLE_W_CAST_FUNCTION_TYPE_WITH_VOID ffunc) {} \
+            DISABLE_W_CAST_FUNCTION_TYPE_POP \
+    }
 
-class AP_UAVCAN : public AP_HAL::CANProtocol {
+#define UC_CLIENT_CALL_REGISTRY_BINDER(ClassName_, DataType_) \
+    class ClassName_ : public AP_UAVCAN::ClientCallRegistryBinder<DataType_> { \
+        typedef void (*CN_Registry)(AP_UAVCAN*, uint8_t, const ClassName_&); \
+        public: \
+            ClassName_() : ClientCallRegistryBinder() {} \
+            DISABLE_W_CAST_FUNCTION_TYPE_PUSH \
+            ClassName_(AP_UAVCAN* uc,  CN_Registry ffunc) : \
+                ClientCallRegistryBinder(uc, (ClientCallRegistry)DISABLE_W_CAST_FUNCTION_TYPE_WITH_VOID ffunc) {} \
+            DISABLE_W_CAST_FUNCTION_TYPE_POP \
+    }
+
+class AP_UAVCAN : public AP_CANDriver, public AP_ESC_Telem_Backend {
+    friend class AP_UAVCAN_DNA_Server;
 public:
     AP_UAVCAN();
     ~AP_UAVCAN();
@@ -74,12 +112,17 @@ public:
 
     // Return uavcan from @driver_index or nullptr if it's not ready or doesn't exist
     static AP_UAVCAN *get_uavcan(uint8_t driver_index);
+    bool prearm_check(char* fail_msg, uint8_t fail_msg_len) const;
 
     void init(uint8_t driver_index, bool enable_filters) override;
+    bool add_interface(AP_HAL::CANIface* can_iface) override;
 
     uavcan::Node<0>* get_node() { return _node; }
-    uint8_t get_driver_index() { return _driver_index; }
+    uint8_t get_driver_index() const { return _driver_index; }
 
+    FUNCTOR_TYPEDEF(ParamGetSetIntCb, bool, AP_UAVCAN*, const uint8_t, const char*, int32_t &);
+    FUNCTOR_TYPEDEF(ParamGetSetFloatCb, bool, AP_UAVCAN*, const uint8_t, const char*, float &);
+    FUNCTOR_TYPEDEF(ParamSaveCb, void, AP_UAVCAN*,  const uint8_t, bool);
 
     ///// SRV output /////
     void SRV_push_servos(void);
@@ -93,6 +136,21 @@ public:
     // send RTCMStream packets
     void send_RTCMStream(const uint8_t *data, uint32_t len);
 
+    // Send Reboot command
+    // Note: Do not call this from outside UAVCAN thread context,
+    // you can call this from uavcan callbacks and handlers.
+    // THIS IS NOT A THREAD SAFE API!
+    void send_reboot_request(uint8_t node_id);
+
+    // set param value
+    bool set_parameter_on_node(uint8_t node_id, const char *name, float value, ParamGetSetFloatCb *cb);
+    bool set_parameter_on_node(uint8_t node_id, const char *name, int32_t value, ParamGetSetIntCb *cb);
+    bool get_parameter_on_node(uint8_t node_id, const char *name, ParamGetSetFloatCb *cb);
+    bool get_parameter_on_node(uint8_t node_id, const char *name, ParamGetSetIntCb *cb);
+
+    // Save parameters
+    bool save_parameters_on_node(uint8_t node_id, ParamSaveCb *cb);
+
     template <typename DataType_>
     class RegistryBinder {
     protected:
@@ -102,7 +160,7 @@ public:
 
     public:
         RegistryBinder() :
-        	_uc(),
+            _uc(),
             _ffunc(),
             msg() {}
 
@@ -119,36 +177,55 @@ public:
         const uavcan::ReceivedDataStructure<DataType_> *msg;
     };
 
-private:
-    class SystemClock: public uavcan::ISystemClock, uavcan::Noncopyable {
+    // ClientCallRegistryBinder
+    template <typename DataType_>
+    class ClientCallRegistryBinder {
+    protected:
+        typedef void (*ClientCallRegistry)(AP_UAVCAN* _ap_uavcan, uint8_t _node_id, const ClientCallRegistryBinder& _cb);
+        AP_UAVCAN* _uc;
+        ClientCallRegistry _ffunc;
     public:
-        SystemClock() = default;
+        ClientCallRegistryBinder() :
+            _uc(),
+            _ffunc(),
+            rsp() {}
 
-        void adjustUtc(uavcan::UtcDuration adjustment) override {
-            utc_adjustment_usec = adjustment.toUSec();
+        ClientCallRegistryBinder(AP_UAVCAN* uc, ClientCallRegistry ffunc) :
+            _uc(uc),
+            _ffunc(ffunc),
+            rsp(nullptr) {}
+
+        void operator()(const uavcan::ServiceCallResult<DataType_>& _rsp) {
+            rsp = &_rsp;
+            _ffunc(_uc, _rsp.getCallID().server_node_id.get(), *this);
         }
-
-        uavcan::MonotonicTime getMonotonic() const override {
-            return uavcan::MonotonicTime::fromUSec(AP_HAL::micros64());
-        }
-
-        uavcan::UtcTime getUtc() const override {
-            return uavcan::UtcTime::fromUSec(AP_HAL::micros64() + utc_adjustment_usec);
-        }
-
-        static SystemClock& instance() {
-            static SystemClock inst;
-            return inst;
-        }
-
-    private:
-        int64_t utc_adjustment_usec;
+        const uavcan::ServiceCallResult<DataType_> *rsp;
     };
+
+    // options bitmask
+    enum class Options : uint16_t {
+        DNA_CLEAR_DATABASE        = (1U<<0),
+        DNA_IGNORE_DUPLICATE_NODE = (1U<<1),
+        CANFD_ENABLED             = (1U<<2),
+        DNA_IGNORE_UNHEALTHY_NODE = (1U<<3),
+        USE_ACTUATOR_PWM          = (1U<<4),
+        SEND_GNSS                 = (1U<<5),
+    };
+
+    // check if a option is set
+    bool option_is_set(Options option) const {
+        return (uint16_t(_options.get()) & uint16_t(option)) != 0;
+    }
+
+    // check if a option is set and if it is then reset it to
+    // 0. return true if it was set
+    bool check_and_reset_option(Options option);
 
     // This will be needed to implement if UAVCAN is used with multithreading
     // Such cases will be firmware update, etc.
     class RaiiSynchronizer {};
 
+private:
     void loop(void);
 
     ///// SRV output /////
@@ -164,20 +241,52 @@ private:
     // SafetyState
     void safety_state_send();
 
+    // send notify vehicle state
+    void notify_state_send();
+
     // send GNSS injection
     void rtcm_stream_send();
 
-    uavcan::PoolAllocator<UAVCAN_NODE_POOL_SIZE, UAVCAN_NODE_POOL_BLOCK_SIZE, AP_UAVCAN::RaiiSynchronizer> _node_allocator;
+    // send parameter get/set request
+    void send_parameter_request();
+    
+    // send parameter save request
+    void send_parameter_save_request();
+
+    // periodic logging
+    void logging();
+    
+    // set parameter on a node
+    ParamGetSetIntCb *param_int_cb;
+    ParamGetSetFloatCb *param_float_cb;
+    bool param_request_sent = true;
+    HAL_Semaphore _param_sem;
+    uint8_t param_request_node_id;
+
+    // save parameters on a node
+    ParamSaveCb *save_param_cb;
+    bool param_save_request_sent = true;
+    HAL_Semaphore _param_save_sem;
+    uint8_t param_save_request_node_id;
 
     // UAVCAN parameters
     AP_Int8 _uavcan_node;
     AP_Int32 _servo_bm;
     AP_Int32 _esc_bm;
+    AP_Int8 _esc_offset;
     AP_Int16 _servo_rate_hz;
+    AP_Int16 _options;
+    AP_Int16 _notify_state_hz;
+    AP_Int16 _pool_size;
+
+    AP_PoolAllocator *_allocator;
+    AP_UAVCAN_DNA_Server *_dna_server;
 
     uavcan::Node<0> *_node;
 
     uint8_t _driver_index;
+
+    uavcan::CanIfaceMgr* _iface_mgr;
     char _thread_name[13];
     bool _initialized;
     ///// SRV output /////
@@ -187,9 +296,16 @@ private:
         bool servo_pending;
     } _SRV_conf[UAVCAN_SRV_NUMBER];
 
+    uint32_t _esc_send_count;
+    uint32_t _srv_send_count;
+    uint32_t _fail_send_count;
+
     uint8_t _SRV_armed;
     uint32_t _SRV_last_send_us;
     HAL_Semaphore SRV_sem;
+
+    // last log time
+    uint32_t last_log_ms;
 
     ///// LED /////
     struct led_device {
@@ -215,6 +331,19 @@ private:
         uint8_t pending_mask; // mask of interfaces to send to
     } _buzzer;
 
+#if AP_DRONECAN_SEND_GPS
+    // send GNSS Fix and yaw, same thing AP_GPS_UAVCAN would receive
+    void gnss_send_fix();
+    void gnss_send_yaw();
+    
+    // GNSS Fix and Status
+    struct {
+        uint32_t last_gps_lib_fix_ms;
+        uint32_t last_send_status_ms;
+        uint32_t last_lib_yaw_time_ms;
+    } _gnss;
+#endif
+
     // GNSS RTCM injection
     struct {
         HAL_Semaphore sem;
@@ -222,14 +351,26 @@ private:
         ByteBuffer *buf;
     } _rtcm_stream;
     
+     // ESC
+
+    static HAL_Semaphore _telem_sem;
+
     // safety status send state
     uint32_t _last_safety_state_ms;
 
-    // safety button handling
+    // notify vehicle state
+    uint32_t _last_notify_state_ms;
+
+    // incoming button handling
     static void handle_button(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ButtonCb &cb);
     static void handle_traffic_report(AP_UAVCAN* ap_uavcan, uint8_t node_id, const TrafficReportCb &cb);
     static void handle_actuator_status(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ActuatorStatusCb &cb);
+    static void handle_actuator_status_Volz(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ActuatorStatusVolzCb &cb);
     static void handle_ESC_status(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ESCStatusCb &cb);
+    static bool is_esc_data_index_valid(const uint8_t index);
+    static void handle_debug(AP_UAVCAN* ap_uavcan, uint8_t node_id, const DebugCb &cb);
+    static void handle_param_get_set_response(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ParamGetSetCb &cb);
+    static void handle_param_save_response(AP_UAVCAN* ap_uavcan, uint8_t node_id, const ParamExecuteOpcodeCb &cb);
 };
 
-#endif /* AP_UAVCAN_H_ */
+#endif // #if HAL_ENABLE_LIBUAVCAN_DRIVERS

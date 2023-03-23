@@ -14,6 +14,7 @@
  *
  */
 
+#include <hal.h>
 #include "SoftSigReaderInt.h"
 #include "hwdef/common/stm32_util.h"
 
@@ -88,6 +89,11 @@ void SoftSigReaderInt::init(EICUDriver* icu_drv, eicuchannel_t chan)
     //sets input for aux_chan
     stm32_timer_set_channel_input(_icu_drv->tim, aux_chan, 2);
     eicuEnable(_icu_drv);
+}
+
+void SoftSigReaderInt::disable(void)
+{
+    eicuDisable(_icu_drv);
 }
 
 void SoftSigReaderInt::_irq_handler(EICUDriver *eicup, eicuchannel_t aux_channel)

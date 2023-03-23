@@ -41,8 +41,13 @@ void loop();
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
-// enable testing of IOMCU watchdog using safety switch
-#define IOMCU_ENABLE_WATCHDOG_TEST 0
+/*
+ enable testing of IOMCU reset using safety switch
+ a value of 0 means normal operation
+ a value of 1 means test with watchdog
+ a value of 2 means test with reboot
+*/
+#define IOMCU_ENABLE_RESET_TEST 0
 
 // pending events on the main thread
 enum ioevents {
@@ -64,14 +69,14 @@ static void dma_rx_end_cb(UARTDriver *uart)
 
     dmaStreamSetMemory0(uart->dmarx, &iomcu.rx_io_packet);
     dmaStreamSetTransactionSize(uart->dmarx, sizeof(iomcu.rx_io_packet));
-    dmaStreamSetMode(uart->dmarx, uart->dmamode    | STM32_DMA_CR_DIR_P2M |
+    dmaStreamSetMode(uart->dmarx, uart->dmarxmode    | STM32_DMA_CR_DIR_P2M |
                      STM32_DMA_CR_MINC | STM32_DMA_CR_TCIE);
     dmaStreamEnable(uart->dmarx);
     uart->usart->CR3 |= USART_CR3_DMAR;
 
     dmaStreamSetMemory0(uart->dmatx, &iomcu.tx_io_packet);
     dmaStreamSetTransactionSize(uart->dmatx, iomcu.tx_io_packet.get_size());
-    dmaStreamSetMode(uart->dmatx, uart->dmamode    | STM32_DMA_CR_DIR_M2P |
+    dmaStreamSetMode(uart->dmatx, uart->dmatxmode    | STM32_DMA_CR_DIR_M2P |
                      STM32_DMA_CR_MINC | STM32_DMA_CR_TCIE);
     dmaStreamEnable(uart->dmatx);
     uart->usart->CR3 |= USART_CR3_DMAT;
@@ -101,7 +106,7 @@ static void idle_rx_handler(UARTDriver *uart)
 
         dmaStreamSetMemory0(uart->dmarx, &iomcu.rx_io_packet);
         dmaStreamSetTransactionSize(uart->dmarx, sizeof(iomcu.rx_io_packet));
-        dmaStreamSetMode(uart->dmarx, uart->dmamode    | STM32_DMA_CR_DIR_P2M |
+        dmaStreamSetMode(uart->dmarx, uart->dmarxmode    | STM32_DMA_CR_DIR_P2M |
                          STM32_DMA_CR_MINC | STM32_DMA_CR_TCIE);
         dmaStreamEnable(uart->dmarx);
         uart->usart->CR3 |= USART_CR3_DMAR;
@@ -124,6 +129,7 @@ static UARTConfig uart_cfg = {
     nullptr,
     nullptr,
     idle_rx_handler,
+    nullptr,
     1500000,      //1.5MBit
     USART_CR1_IDLEIE,
     0,
@@ -256,6 +262,7 @@ void AP_IOMCU_FW::update()
         if (dsm_bind_state) {
             dsm_bind_step();
         }
+        GPIO_write();
     }
 }
 
@@ -299,14 +306,14 @@ void AP_IOMCU_FW::rcin_update()
 {
     ((ChibiOS::RCInput *)hal.rcin)->_timer_tick();
     if (hal.rcin->new_input()) {
+        const auto &rc = AP::RC();
         rc_input.count = hal.rcin->num_channels();
         rc_input.flags_rc_ok = true;
-        for (uint8_t i = 0; i < IOMCU_MAX_CHANNELS; i++) {
-            rc_input.pwm[i] = hal.rcin->read(i);
-        }
+        hal.rcin->read(rc_input.pwm, IOMCU_MAX_CHANNELS);
         rc_last_input_ms = last_ms;
-        rc_input.rc_protocol = (uint16_t)AP::RC().protocol_detected();
-        rc_input.rssi = AP::RC().get_RSSI();
+        rc_input.rc_protocol = (uint16_t)rc.protocol_detected();
+        rc_input.rssi = rc.get_RSSI();
+        rc_input.flags_failsafe = rc.failsafe_active();
     } else if (last_ms - rc_last_input_ms > 200U) {
         rc_input.flags_rc_ok = false;
     }
@@ -316,6 +323,7 @@ void AP_IOMCU_FW::rcin_update()
     }
     if (update_default_rate) {
         hal.rcout->set_default_rate(reg_setup.pwm_defaultrate);
+        update_default_rate = false;
     }
 
     bool old_override = override_active;
@@ -528,6 +536,9 @@ bool AP_IOMCU_FW::handle_code_write()
             } else {
                 palSetLine(HAL_GPIO_PIN_SBUS_OUT_EN);
             }
+            if (reg_setup.features & P_SETUP_FEATURES_HEATER) {
+                has_heater = true;
+            }
             break;
 
         case PAGE_REG_SETUP_HEATER_DUTY_CYCLE:
@@ -558,6 +569,15 @@ bool AP_IOMCU_FW::handle_code_write()
                 dsm_bind_state = 1;
             }
             break;
+
+        case PAGE_REG_SETUP_RC_PROTOCOLS: {
+            if (rx_io_packet.count == 2) {
+                uint32_t v;
+                memcpy(&v, &rx_io_packet.regs[0], 4);
+                AP::RC().set_rc_protocols(v);
+            }
+            break;
+        }
 
         default:
             break;
@@ -598,15 +618,6 @@ bool AP_IOMCU_FW::handle_code_write()
         break;
     }
 
-    case PAGE_SAFETY_PWM: {
-        uint16_t offset = rx_io_packet.offset, num_values = rx_io_packet.count;
-        if (offset + num_values > sizeof(reg_safety_pwm.pwm)/2) {
-            return false;
-        }
-        memcpy((&reg_safety_pwm.pwm[0])+offset, &rx_io_packet.regs[0], num_values*2);
-        break;
-    }
-
     case PAGE_FAILSAFE_PWM: {
         uint16_t offset = rx_io_packet.offset, num_values = rx_io_packet.count;
         if (offset + num_values > sizeof(reg_failsafe_pwm.pwm)/2) {
@@ -615,6 +626,24 @@ bool AP_IOMCU_FW::handle_code_write()
         memcpy((&reg_failsafe_pwm.pwm[0])+offset, &rx_io_packet.regs[0], num_values*2);
         break;
     }
+
+    case PAGE_GPIO:
+        if (rx_io_packet.count != 1) {
+            return false;
+        }
+        memcpy(&GPIO, &rx_io_packet.regs[0] + rx_io_packet.offset, sizeof(GPIO));
+        if (GPIO.channel_mask != last_GPIO_channel_mask) {
+            for (uint8_t i=0; i<8; i++) {
+                if ((GPIO.channel_mask & (1U << i)) != 0) {
+                    hal.rcout->disable_ch(i);
+                    hal.gpio->pinMode(101+i, HAL_GPIO_OUTPUT);
+                } else {
+                    hal.rcout->enable_ch(i);
+                }
+            }
+            last_GPIO_channel_mask = GPIO.channel_mask;
+        }
+        break;
 
     default:
         break;
@@ -686,21 +715,40 @@ void AP_IOMCU_FW::safety_update(void)
         }
     }
 
-#if IOMCU_ENABLE_WATCHDOG_TEST
-    if (safety_button_counter == 50) {
+#if IOMCU_ENABLE_RESET_TEST
+    {
         // deliberate lockup of IOMCU on 5s button press, for testing
         // watchdog
-        while (true) {
-            hal.scheduler->delay(50);
-            palToggleLine(HAL_GPIO_PIN_SAFETY_LED);
-            if (palReadLine(HAL_GPIO_PIN_SAFETY_INPUT)) {
-                // only trigger watchdog on button release, so we
-                // don't end up stuck in the bootloader
-                stm32_watchdog_pat();
+        static uint32_t safety_test_counter;
+        static bool should_lockup;
+        if (palReadLine(HAL_GPIO_PIN_SAFETY_INPUT)) {
+            safety_test_counter++;
+        } else {
+            safety_test_counter = 0;
+        }
+        if (safety_test_counter == 50) {
+            should_lockup = true;
+        }
+        // wait for lockup for safety to be released so we don't end
+        // up in the bootloader
+        if (should_lockup && palReadLine(HAL_GPIO_PIN_SAFETY_INPUT) == 0) {
+#if IOMCU_ENABLE_RESET_TEST == 1
+            // lockup with watchdog
+            while (true) {
+                hal.scheduler->delay(50);
+                palToggleLine(HAL_GPIO_PIN_SAFETY_LED);
             }
+#else
+            // hard fault to simulate power reset or software fault
+            void *foo = (void*)0xE000ED38;
+            typedef void (*fptr)();
+            fptr gptr = (fptr) (void *) foo;
+            gptr();
+            while (true) {}
+#endif
         }
     }
-#endif
+#endif // IOMCU_ENABLE_RESET_TEST
 
     led_counter = (led_counter+1) % 16;
     const uint16_t led_pattern = reg_status.flag_safety_off?0xFFFF:0x5500;
@@ -741,11 +789,20 @@ void AP_IOMCU_FW::fill_failsafe_pwm(void)
         if (reg_status.flag_safety_off) {
             reg_direct_pwm.pwm[i] = reg_failsafe_pwm.pwm[i];
         } else {
-            reg_direct_pwm.pwm[i] = reg_safety_pwm.pwm[i];
+            reg_direct_pwm.pwm[i] = 0;
         }
     }
     if (mixing.enabled) {
         run_mixer();
+    }
+}
+
+void AP_IOMCU_FW::GPIO_write()
+{
+    for (uint8_t i=0; i<8; i++) {
+        if ((GPIO.channel_mask & (1U << i)) != 0) {
+            hal.gpio->write(101+i, (GPIO.output_mask & (1U << i)) != 0);
+        }
     }
 }
 

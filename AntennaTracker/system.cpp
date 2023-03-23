@@ -3,34 +3,14 @@
 // mission storage
 static const StorageAccess wp_storage(StorageManager::StorageMission);
 
-void Tracker::init_tracker()
+void Tracker::init_ardupilot()
 {
-    // initialise console serial port
-    serial_manager.init_console();
-
-    hal.console->printf("\n\nInit %s\n\nFree RAM: %u\n",
-                        AP::fwversion().fw_string,
-                        (unsigned)hal.util->available_memory());
-
-    // Check the EEPROM format version before loading any parameters from EEPROM
-    load_parameters();
-
     // initialise stats module
     stats.init();
 
-    mavlink_system.sysid = g.sysid_this_mav;
-
-    // initialise serial ports
-    serial_manager.init();
-
-    // setup first port early to allow BoardConfig to report errors
-    gcs().setup_console();
-
-    register_scheduler_delay_callback();
-
     BoardConfig.init();
-#if HAL_WITH_UAVCAN
-    BoardConfig_CAN.init();
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+    can_mgr.init();
 #endif
 
     // initialise notify
@@ -47,14 +27,18 @@ void Tracker::init_tracker()
 
     // setup telem slots with serial ports
     gcs().setup_uarts();
+    // update_send so that if the first packet we receive happens to
+    // be an arm message we don't trigger an internal error when we
+    // try to initialise stream rates in the main loop.
+    gcs().update_send();
 
 #if LOGGING_ENABLED == ENABLED
     log_init();
 #endif
 
-#ifdef ENABLE_SCRIPTING
+#if AP_SCRIPTING_ENABLED
     scripting.init();
-#endif // ENABLE_SCRIPTING
+#endif // AP_SCRIPTING_ENABLED
 
     // initialise compass
     AP::compass().set_log_bit(MASK_LOG_COMPASS);
@@ -79,6 +63,7 @@ void Tracker::init_tracker()
     serial_manager.set_blocking_writes_all(false);
 
     // initialise rc channels including setting mode
+    rc().convert_options(RC_Channel::AUX_FUNC::ARMDISARM_UNUSED, RC_Channel::AUX_FUNC::ARMDISARM);
     rc().init();
 
     // initialise servos
@@ -99,7 +84,6 @@ void Tracker::init_tracker()
         get_home_eeprom(current_loc);
     }
 
-    gcs().send_text(MAV_SEVERITY_INFO,"Ready to track");
     hal.scheduler->delay(1000); // Why????
 
     Mode *newmode = mode_from_mode_num((Mode::Number)g.initial_mode.get());
@@ -113,15 +97,12 @@ void Tracker::init_tracker()
         // for some servos)
         prepare_servos();
     }
-
-    // disable safety if requested
-    BoardConfig.init_safety();    
 }
 
 /*
   fetch HOME from EEPROM
 */
-bool Tracker::get_home_eeprom(struct Location &loc)
+bool Tracker::get_home_eeprom(Location &loc) const
 {
     // Find out proper location in memory by using the start_byte position + the index
     // --------------------------------------------------------------------------------
@@ -197,6 +178,8 @@ void Tracker::prepare_servos()
 
 void Tracker::set_mode(Mode &newmode, const ModeReason reason)
 {
+    control_mode_reason = reason;
+
     if (mode == &newmode) {
         // don't switch modes if we are already in the correct mode.
         return;
@@ -260,28 +243,16 @@ bool Tracker::should_log(uint32_t mask)
 }
 
 
-#include <AP_Camera/AP_Camera.h>
 #include <AP_AdvancedFailsafe/AP_AdvancedFailsafe.h>
 #include <AP_Avoidance/AP_Avoidance.h>
 #include <AP_ADSB/AP_ADSB.h>
 
-/* dummy methods to avoid having to link against AP_Camera */
-void AP_Camera::control_msg(const mavlink_message_t &) {}
-void AP_Camera::configure(float, float, float, float, float, float, float) {}
-void AP_Camera::control(float, float, float, float, float, float) {}
-void AP_Camera::send_feedback(mavlink_channel_t chan) {}
-void AP_Camera::take_picture() {}
-namespace AP {
-    AP_Camera *camera() {
-        return nullptr;
-    }
-};
-
-/* end dummy methods to avoid having to link against AP_Camera */
-
+#if AP_ADVANCEDFAILSAFE_ENABLED
 // dummy method to avoid linking AFS
 bool AP_AdvancedFailsafe::gcs_terminate(bool should_terminate, const char *reason) {return false;}
 AP_AdvancedFailsafe *AP::advancedfailsafe() { return nullptr; }
-
+#endif  // AP_ADVANCEDFAILSAFE_ENABLED
+#if HAL_ADSB_ENABLED
 // dummy method to avoid linking AP_Avoidance
 AP_Avoidance *AP::ap_avoidance() { return nullptr; }
+#endif

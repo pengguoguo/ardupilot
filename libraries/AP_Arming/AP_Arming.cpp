@@ -17,6 +17,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
+#include <AP_Compass/AP_Compass.h>
 #include <AP_Notify/AP_Notify.h>
 #include <GCS_MAVLink/GCS.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
@@ -25,25 +26,43 @@
 #include <AP_Rally/AP_Rally.h>
 #include <SRV_Channel/SRV_Channel.h>
 #include <AC_Fence/AC_Fence.h>
+#include <AP_InertialSensor/AP_InertialSensor.h>
 #include <AP_InternalError/AP_InternalError.h>
 #include <AP_GPS/AP_GPS.h>
 #include <AP_Airspeed/AP_Airspeed.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Baro/AP_Baro.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
+#include <AP_Generator/AP_Generator.h>
 #include <AP_Terrain/AP_Terrain.h>
+#include <AP_ADSB/AP_ADSB.h>
 #include <AP_Scripting/AP_Scripting.h>
 #include <AP_Camera/AP_RunCam.h>
+#include <AP_GyroFFT/AP_GyroFFT.h>
+#include <AP_RCMapper/AP_RCMapper.h>
+#include <AP_VisualOdom/AP_VisualOdom.h>
+#include <AP_Parachute/AP_Parachute.h>
+#include <AP_OSD/AP_OSD.h>
+#include <AP_Relay/AP_Relay.h>
+#include <RC_Channel/RC_Channel.h>
+#include <AP_Button/AP_Button.h>
+#include <AP_FETtecOneWire/AP_FETtecOneWire.h>
+#include <AP_RPM/AP_RPM.h>
+#include <AP_Mount/AP_Mount.h>
+#include <AP_OpenDroneID/AP_OpenDroneID.h>
+#include <AP_SerialManager/AP_SerialManager.h>
+#include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <AP_Scheduler/AP_Scheduler.h>
 
-#if HAL_WITH_UAVCAN
-  #include <AP_BoardConfig/AP_BoardConfig_CAN.h>
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+  #include <AP_CANManager/AP_CANManager.h>
   #include <AP_Common/AP_Common.h>
-  #include <AP_Vehicle/AP_Vehicle.h>
+  #include <AP_Vehicle/AP_Vehicle_Type.h>
 
   #include <AP_PiccoloCAN/AP_PiccoloCAN.h>
 
   // To be replaced with macro saying if KDECAN library is included
-  #if APM_BUILD_TYPE(APM_BUILD_ArduCopter) || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)
+  #if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)
     #include <AP_KDECAN/AP_KDECAN.h>
   #endif
   #include <AP_UAVCAN/AP_UAVCAN.h>
@@ -64,17 +83,21 @@
   #define ARMING_RUDDER_DEFAULT         (uint8_t)RudderArming::ARMDISARM
 #endif
 
+#ifndef PREARM_DISPLAY_PERIOD
+# define PREARM_DISPLAY_PERIOD 30
+#endif
+
 extern const AP_HAL::HAL& hal;
 
 const AP_Param::GroupInfo AP_Arming::var_info[] = {
 
-    // @Param: REQUIRE
+    // @Param{Plane, Rover}: REQUIRE
     // @DisplayName: Require Arming Motors 
-    // @Description: Arming disabled until some requirements are met. If 0, there are no requirements (arm immediately).  If 1, require rudder stick or GCS arming before arming motors and sends the minimum throttle PWM value to the throttle channel when disarmed.  If 2, require rudder stick or GCS arming and send 0 PWM to throttle channel when disarmed. See the ARMING_CHECK_* parameters to see what checks are done before arming. Note, if setting this parameter to 0 a reboot is required to arm the plane.  Also note, even with this parameter at 0, if ARMING_CHECK parameter is not also zero the plane may fail to arm throttle at boot due to a pre-arm check failure.
-    // @Values: 0:Disabled,1:THR_MIN PWM when disarmed,2:0 PWM when disarmed
+    // @Description: Arming disabled until some requirements are met. If 0, there are no requirements (arm immediately).  If 1, require rudder stick or GCS arming before arming motors and sends the minimum throttle PWM value to the throttle channel when disarmed.  If 2, require rudder stick or GCS arming and send 0 PWM to throttle channel when disarmed. See the ARMING_CHECK_* parameters to see what checks are done before arming. Note, if setting this parameter to 0 a reboot is required to arm the plane.  Also note, even with this parameter at 0, if ARMING_CHECK parameter is not also zero the plane may fail to arm throttle at boot due to a pre-arm check failure. On planes with ICE enabled and the throttle while disarmed option set in ICE_OPTIONS the motor will get THR_MIN when disarmed.
+    // @Values: 0:Disabled,1:minimum PWM when disarmed,2:0 PWM when disarmed
     // @User: Advanced
-    AP_GROUPINFO_FLAGS_FRAME("REQUIRE",     0,      AP_Arming,  require,                 1,
-                             AP_PARAM_NO_SHIFT,
+    AP_GROUPINFO_FLAGS_FRAME("REQUIRE",     0,      AP_Arming,  require, float(Required::YES_MIN_PWM),
+                             AP_PARAM_FLAG_NO_SHIFT,
                              AP_PARAM_FRAME_PLANE | AP_PARAM_FRAME_ROVER),
 
     // 2 was the CHECK paramter stored in a AP_Int16
@@ -92,31 +115,37 @@ const AP_Param::GroupInfo AP_Arming::var_info[] = {
 
     // @Param: RUDDER
     // @DisplayName: Arming with Rudder enable/disable
-    // @Description: Allow arm/disarm by rudder input. When enabled arming can be done with right rudder, disarming with left rudder. Rudder arming only works in manual throttle modes with throttle at zero +- deadzone (RCx_DZ)
+    // @Description: Allow arm/disarm by rudder input. When enabled arming can be done with right rudder, disarming with left rudder. Rudder arming only works with throttle at zero +- deadzone (RCx_DZ). Depending on vehicle type, arming in certain modes is prevented. See the wiki for each vehicle. Caution is recommended when arming if it is allowed in an auto-throttle mode!
     // @Values: 0:Disabled,1:ArmingOnly,2:ArmOrDisarm
     // @User: Advanced
     AP_GROUPINFO_FRAME("RUDDER",  6,     AP_Arming, _rudder_arming, ARMING_RUDDER_DEFAULT, AP_PARAM_FRAME_PLANE |
                                                                                            AP_PARAM_FRAME_ROVER |
                                                                                            AP_PARAM_FRAME_COPTER |
                                                                                            AP_PARAM_FRAME_TRICOPTER |
-                                                                                           AP_PARAM_FRAME_HELI),
+                                                                                           AP_PARAM_FRAME_HELI |
+                                                                                           AP_PARAM_FRAME_BLIMP),
 
     // @Param: MIS_ITEMS
     // @DisplayName: Required mission items
     // @Description: Bitmask of mission items that are required to be planned in order to arm the aircraft
-    // @Bitmask: 0:Land,1:VTOL Land,2:DO_LAND_START,3:Takeoff,4:VTOL Takeoff,5:Rallypoint
+    // @Bitmask: 0:Land,1:VTOL Land,2:DO_LAND_START,3:Takeoff,4:VTOL Takeoff,5:Rallypoint,6:RTL
     // @User: Advanced
     AP_GROUPINFO("MIS_ITEMS",    7,     AP_Arming, _required_mission_items, 0),
 
     // @Param: CHECK
     // @DisplayName: Arm Checks to Perform (bitmask)
-    // @Description: Checks prior to arming motor. This is a bitmask of checks that will be performed before allowing arming. The default is no checks, allowing arming at any time. You can select whatever checks you prefer by adding together the values of each check type to set this parameter. For example, to only allow arming when you have GPS lock and no RC failsafe you would set ARMING_CHECK to 72. For most users it is recommended that you set this to 1 to enable all checks.
-    // @Values: 0:None,1:All,2:Barometer,4:Compass,8:GPS Lock,16:INS(INertial Sensors - accels & gyros),32:Parameters(unused),64:RC Channels,128:Board voltage,256:Battery Level,1024:LoggingAvailable,2048:Hardware safety switch,4096:GPS configuration,8192:System,16384:Mission,32768:RangeFinder,65536:Camera
-    // @Values{Plane}: 0:None,1:All,2:Barometer,4:Compass,8:GPS Lock,16:INS(INertial Sensors - accels & gyros),32:Parameters(unused),64:RC Channels,128:Board voltage,256:Battery Level,512:Airspeed,1024:LoggingAvailable,2048:Hardware safety switch,4096:GPS configuration,8192:System,16384:Mission,32768:RangeFinder,65536:Camera
-    // @Bitmask: 0:All,1:Barometer,2:Compass,3:GPS lock,4:INS,5:Parameters,6:RC Channels,7:Board voltage,8:Battery Level,10:Logging Available,11:Hardware safety switch,12:GPS Configuration,13:System,14:Mission,15:Rangefinder,16:Camera
-    // @Bitmask{Plane}: 0:All,1:Barometer,2:Compass,3:GPS lock,4:INS,5:Parameters,6:RC Channels,7:Board voltage,8:Battery Level,9:Airspeed,10:Logging Available,11:Hardware safety switch,12:GPS Configuration,13:System,14:Mission,15:Rangefinder,16:Camera
+    // @Description: Checks prior to arming motor. This is a bitmask of checks that will be performed before allowing arming. For most users it is recommended to leave this at the default of 1 (all checks enabled). You can select whatever checks you prefer by adding together the values of each check type to set this parameter. For example, to only allow arming when you have GPS lock and no RC failsafe you would set ARMING_CHECK to 72.
+    // @Bitmask: 0:All,1:Barometer,2:Compass,3:GPS lock,4:INS,5:Parameters,6:RC Channels,7:Board voltage,8:Battery Level,10:Logging Available,11:Hardware safety switch,12:GPS Configuration,13:System,14:Mission,15:Rangefinder,16:Camera,17:AuxAuth,18:VisualOdometry,19:FFT
+    // @Bitmask{Plane}: 0:All,1:Barometer,2:Compass,3:GPS lock,4:INS,5:Parameters,6:RC Channels,7:Board voltage,8:Battery Level,9:Airspeed,10:Logging Available,11:Hardware safety switch,12:GPS Configuration,13:System,14:Mission,15:Rangefinder,16:Camera,17:AuxAuth,19:FFT
     // @User: Standard
     AP_GROUPINFO("CHECK",        8,     AP_Arming,  checks_to_perform,       ARMING_CHECK_ALL),
+
+    // @Param: OPTIONS
+    // @DisplayName: Arming options
+    // @Description: Options that can be applied to change arming behaviour
+    // @Values: 0:None,1:Disable prearm display
+    // @User: Advanced
+    AP_GROUPINFO("OPTIONS", 9,   AP_Arming, _arming_options, 0),
 
     AP_GROUPEND
 };
@@ -136,17 +165,43 @@ AP_Arming::AP_Arming()
     AP_Param::setup_object_defaults(this, var_info);
 }
 
+// performs pre-arm checks. expects to be called at 1hz.
+void AP_Arming::update(void)
+{
+    const uint32_t now_ms = AP_HAL::millis();
+    // perform pre-arm checks & display failures every 30 seconds
+    bool display_fail = false;
+    if (now_ms - last_prearm_display_ms > PREARM_DISPLAY_PERIOD*1000) {
+        display_fail = true;
+        last_prearm_display_ms = now_ms;
+    }
+    // OTOH, the user may never want to display them:
+    if (option_enabled(Option::DISABLE_PREARM_DISPLAY)) {
+        display_fail = false;
+    }
+
+    pre_arm_checks(display_fail);
+}
+
 uint16_t AP_Arming::compass_magfield_expected() const
 {
     return AP_ARMING_COMPASS_MAGFIELD_EXPECTED;
 }
 
-bool AP_Arming::is_armed()
+bool AP_Arming::is_armed() const
 {
-    return (Required)require.get() == Required::NO || armed;
+    return armed || arming_required() == Required::NO;
 }
 
-uint16_t AP_Arming::get_enabled_checks()
+/*
+  true if armed and safety is off
+ */
+bool AP_Arming::is_armed_and_safety_off() const
+{
+    return is_armed() && hal.util->safety_switch_state() != AP_HAL::Util::SAFETY_DISARMED;
+}
+
+uint32_t AP_Arming::get_enabled_checks() const
 {
     return checks_to_perform;
 }
@@ -159,22 +214,27 @@ bool AP_Arming::check_enabled(const enum AP_Arming::ArmingChecks check) const
     return (checks_to_perform & check);
 }
 
-MAV_SEVERITY AP_Arming::check_severity(const enum AP_Arming::ArmingChecks check) const
-{
-    if (check_enabled(check)) {
-        return MAV_SEVERITY_CRITICAL;
-    }
-    return MAV_SEVERITY_DEBUG; // technically should be NOTICE, but will annoy users at that level
-}
-
 void AP_Arming::check_failed(const enum AP_Arming::ArmingChecks check, bool report, const char *fmt, ...) const
 {
     if (!report) {
         return;
     }
     char taggedfmt[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
-    hal.util->snprintf(taggedfmt, sizeof(taggedfmt), "PreArm: %s", fmt);
-    MAV_SEVERITY severity = check_severity(check);
+
+    // metafmt is wrapped around the passed-in format string to
+    // prepend "PreArm" or "Arm", depending on what sorts of checks
+    // we're currently doing.
+    const char *metafmt = "PreArm: %s";  // it's formats all the way down
+    if (running_arming_checks) {
+        metafmt = "Arm: %s";
+    }
+    hal.util->snprintf(taggedfmt, sizeof(taggedfmt), metafmt, fmt);
+
+    MAV_SEVERITY severity = MAV_SEVERITY_CRITICAL;
+    if (!check_enabled(check)) {
+        // technically should be NOTICE, but will annoy users at that level:
+        severity = MAV_SEVERITY_DEBUG;
+    }
     va_list arg_list;
     va_start(arg_list, fmt);
     gcs().send_textv(severity, taggedfmt, arg_list);
@@ -187,7 +247,16 @@ void AP_Arming::check_failed(bool report, const char *fmt, ...) const
         return;
     }
     char taggedfmt[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
-    hal.util->snprintf(taggedfmt, sizeof(taggedfmt), "PreArm: %s", fmt);
+
+    // metafmt is wrapped around the passed-in format string to
+    // prepend "PreArm" or "Arm", depending on what sorts of checks
+    // we're currently doing.
+    const char *metafmt = "PreArm: %s";  // it's formats all the way down
+    if (running_arming_checks) {
+        metafmt = "Arm: %s";
+    }
+    hal.util->snprintf(taggedfmt, sizeof(taggedfmt), metafmt, fmt);
+
     va_list arg_list;
     va_start(arg_list, fmt);
     gcs().send_textv(MAV_SEVERITY_CRITICAL, taggedfmt, arg_list);
@@ -196,10 +265,19 @@ void AP_Arming::check_failed(bool report, const char *fmt, ...) const
 
 bool AP_Arming::barometer_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_BARO)) {
-        if (!AP::baro().all_healthy()) {
-            check_failed(ARMING_CHECK_BARO, report, "Barometer not healthy");
+#ifdef HAL_BARO_ALLOW_INIT_NO_BARO
+    return true;
+#endif
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (AP::sitl()->baro_count == 0) {
+        // simulate no baro boards
+        return true;
+    }
+#endif
+    if (check_enabled(ARMING_CHECK_BARO)) {
+        char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
+        if (!AP::baro().arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_BARO, report, "Baro: %s", buffer);
             return false;
         }
     }
@@ -209,8 +287,8 @@ bool AP_Arming::barometer_checks(bool report)
 
 bool AP_Arming::airspeed_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_AIRSPEED)) {
+#if AP_AIRSPEED_ENABLED
+    if (check_enabled(ARMING_CHECK_AIRSPEED)) {
         const AP_Airspeed *airspeed = AP_Airspeed::get_singleton();
         if (airspeed == nullptr) {
             // not an airspeed capable vehicle
@@ -223,14 +301,14 @@ bool AP_Arming::airspeed_checks(bool report)
             }
         }
     }
+#endif
 
     return true;
 }
 
 bool AP_Arming::logging_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_LOGGING)) {
+    if (check_enabled(ARMING_CHECK_LOGGING)) {
         if (!AP::logger().logging_present()) {
             // Logging is disabled, so nothing to check.
             return true;
@@ -241,6 +319,10 @@ bool AP_Arming::logging_checks(bool report)
         }
         if (!AP::logger().CardInserted()) {
             check_failed(ARMING_CHECK_LOGGING, report, "No SD card");
+            return false;
+        }
+        if (AP::logger().in_log_download()) {
+            check_failed(ARMING_CHECK_LOGGING, report, "Downloading logs");
             return false;
         }
     }
@@ -277,12 +359,23 @@ bool AP_Arming::ins_accels_consistent(const AP_InertialSensor &ins)
         // EKF is less sensitive to Z-axis error
         vec_diff.z *= 0.5f;
 
-        if (vec_diff.length() <= threshold) {
-            last_accel_pass_ms[i] = now;
-        }
-        if (now - last_accel_pass_ms[i] > 10000) {
+        if (vec_diff.length() > threshold) {
+            // this sensor disagrees with the primary sensor, so
+            // accels are inconsistent:
+            last_accel_pass_ms = 0;
             return false;
         }
+    }
+
+    if (last_accel_pass_ms == 0) {
+        // we didn't return false in the loop above, so sensors are
+        // consistent right now:
+        last_accel_pass_ms = now;
+    }
+
+    // must pass for at least 10 seconds before we're considered consistent:
+    if (now - last_accel_pass_ms < 10000) {
+        return false;
     }
 
     return true;
@@ -304,14 +397,24 @@ bool AP_Arming::ins_gyros_consistent(const AP_InertialSensor &ins)
         // get next gyro vector
         const Vector3f &gyro_vec = ins.get_gyro(i);
         const Vector3f vec_diff = gyro_vec - prime_gyro_vec;
-        // allow for up to 5 degrees/s difference. Pass if it has
-        // been OK in last 10 seconds
-        if (vec_diff.length() <= radians(5)) {
-            last_gyro_pass_ms[i] = now;
-        }
-        if (now - last_gyro_pass_ms[i] > 10000) {
+        // allow for up to 5 degrees/s difference
+        if (vec_diff.length() > radians(5)) {
+            // this sensor disagrees with the primary sensor, so
+            // gyros are inconsistent:
+            last_gyro_pass_ms = 0;
             return false;
         }
+    }
+
+    // we didn't return false in the loop above, so sensors are
+    // consistent right now:
+    if (last_gyro_pass_ms == 0) {
+        last_gyro_pass_ms = now;
+    }
+
+    // must pass for at least 10 seconds before we're considered consistent:
+    if (now - last_gyro_pass_ms < 10000) {
+        return false;
     }
 
     return true;
@@ -319,8 +422,7 @@ bool AP_Arming::ins_gyros_consistent(const AP_InertialSensor &ins)
 
 bool AP_Arming::ins_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_INS)) {
+    if (check_enabled(ARMING_CHECK_INS)) {
         const AP_InertialSensor &ins = AP::ins();
         if (!ins.get_gyro_health_all()) {
             check_failed(ARMING_CHECK_INS, report, "Gyros not healthy");
@@ -357,13 +459,35 @@ bool AP_Arming::ins_checks(bool report)
             return false;
         }
 
-        // check AHRS attitudes are consistent
-        char failure_msg[50] = {};
-        if (!AP::ahrs().attitudes_consistent(failure_msg, ARRAY_SIZE(failure_msg))) {
-            check_failed(ARMING_CHECK_INS, report, "%s", failure_msg);
+        // no arming while doing temp cal
+        if (ins.temperature_cal_running()) {
+            check_failed(ARMING_CHECK_INS, report, "temperature cal running");
+            return false;
+        }
+
+#if AP_INERTIALSENSOR_BATCHSAMPLER_ENABLED
+        // If Batch sampling enabled it must be initialized
+        if (ins.batchsampler.enabled() && !ins.batchsampler.is_initialised()) {
+            check_failed(ARMING_CHECK_INS, report, "Batch sampling requires reboot");
+            return false;
+        }
+#endif
+
+    }
+
+#if HAL_GYROFFT_ENABLED
+    // gyros are healthy so check the FFT
+    if (check_enabled(ARMING_CHECK_FFT)) {
+        // Check that the noise analyser works
+        AP_GyroFFT *fft = AP::fft();
+
+        char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+        if (fft != nullptr && !fft->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+            check_failed(ARMING_CHECK_INS, report, "%s", fail_msg);
             return false;
         }
     }
+#endif
 
     return true;
 }
@@ -372,6 +496,7 @@ bool AP_Arming::compass_checks(bool report)
 {
     Compass &_compass = AP::compass();
 
+#if COMPASS_CAL_ENABLED
     // check if compass is calibrating
     if (_compass.is_calibrating()) {
         check_failed(report, "Compass calibration running");
@@ -383,13 +508,13 @@ bool AP_Arming::compass_checks(bool report)
         check_failed(report, "Compass calibrated requires reboot");
         return false;
     }
+#endif
 
-    if ((checks_to_perform) & ARMING_CHECK_ALL ||
-        (checks_to_perform) & ARMING_CHECK_COMPASS) {
+    if (check_enabled(ARMING_CHECK_COMPASS)) {
 
         // avoid Compass::use_for_yaw(void) as it implicitly calls healthy() which can
         // incorrectly skip the remaining checks, pass the primary instance directly
-        if (!_compass.use_for_yaw(_compass.get_primary())) {
+        if (!_compass.use_for_yaw(0)) {
             // compass use is disabled
             return true;
         }
@@ -399,9 +524,17 @@ bool AP_Arming::compass_checks(bool report)
             return false;
         }
         // check compass learning is on or offsets have been set
-        if (!_compass.learn_offsets_enabled() && !_compass.configured()) {
-            check_failed(ARMING_CHECK_COMPASS, report, "Compass not calibrated");
-            return false;
+#if !APM_BUILD_COPTER_OR_HELI && !APM_BUILD_TYPE(APM_BUILD_Blimp)
+        // check compass offsets have been set if learning is off
+        // copter and blimp always require configured compasses
+        if (!_compass.learn_offsets_enabled())
+#endif
+        {
+            char failure_msg[50] = {};
+            if (!_compass.configured(failure_msg, ARRAY_SIZE(failure_msg))) {
+                check_failed(ARMING_CHECK_COMPASS, report, "%s", failure_msg);
+                return false;
+            }
         }
 
         // check for unreasonable compass offsets
@@ -414,7 +547,7 @@ bool AP_Arming::compass_checks(bool report)
         // check for unreasonable mag field length
         const float mag_field = _compass.get_field().length();
         if (mag_field > AP_ARMING_COMPASS_MAGFIELD_MAX || mag_field < AP_ARMING_COMPASS_MAGFIELD_MIN) {
-            check_failed(ARMING_CHECK_COMPASS, report, "Check mag field");
+            check_failed(ARMING_CHECK_COMPASS, report, "Check mag field: %4.0f, max %d, min %d", (double)mag_field, AP_ARMING_COMPASS_MAGFIELD_MAX, AP_ARMING_COMPASS_MAGFIELD_MIN);
             return false;
         }
 
@@ -431,18 +564,46 @@ bool AP_Arming::compass_checks(bool report)
 bool AP_Arming::gps_checks(bool report)
 {
     const AP_GPS &gps = AP::gps();
-    if ((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_GPS)) {
+    if (check_enabled(ARMING_CHECK_GPS)) {
 
-        //GPS OK?
-        if (!AP::ahrs().home_is_set() ||
-            gps.status() < AP_GPS::GPS_OK_FIX_3D) {
-            check_failed(ARMING_CHECK_GPS, report, "Bad GPS Position");
+        // Any failure messages from GPS backends
+        char failure_msg[50] = {};
+        if (!AP::gps().backends_healthy(failure_msg, ARRAY_SIZE(failure_msg))) {
+            if (failure_msg[0] != '\0') {
+                check_failed(ARMING_CHECK_GPS, report, "%s", failure_msg);
+            }
             return false;
         }
 
-        //GPS update rate acceptable
-        if (!gps.is_healthy()) {
-            check_failed(ARMING_CHECK_GPS, report, "GPS is not healthy");
+        for (uint8_t i = 0; i < gps.num_sensors(); i++) {
+#if defined(GPS_BLENDED_INSTANCE)
+            if ((i != GPS_BLENDED_INSTANCE) &&
+#else
+            if (
+#endif
+                    (gps.get_type(i) == AP_GPS::GPS_Type::GPS_TYPE_NONE)) {
+                if (gps.primary_sensor() == i) {
+                    check_failed(ARMING_CHECK_GPS, report, "GPS %i: primary but TYPE 0", i+1);
+                    return false;
+                }
+                continue;
+            }
+
+            //GPS OK?
+            if (gps.status(i) < AP_GPS::GPS_OK_FIX_3D) {
+                check_failed(ARMING_CHECK_GPS, report, "GPS %i: Bad fix", i+1);
+                return false;
+            }
+
+            //GPS update rate acceptable
+            if (!gps.is_healthy(i)) {
+                check_failed(ARMING_CHECK_GPS, report, "GPS %i: not healthy", i+1);
+                return false;
+            }
+        }
+
+        if (!AP::ahrs().home_is_set()) {
+            check_failed(ARMING_CHECK_GPS, report, "AHRS: waiting for home");
             return false;
         }
 
@@ -459,18 +620,20 @@ bool AP_Arming::gps_checks(bool report)
         }
 
         // check AHRS and GPS are within 10m of each other
-        const Location gps_loc = gps.location();
-        Location ahrs_loc;
-        if (AP::ahrs().get_position(ahrs_loc)) {
-            const float distance = gps_loc.get_distance(ahrs_loc);
-            if (distance > AP_ARMING_AHRS_GPS_ERROR_MAX) {
-                check_failed(ARMING_CHECK_GPS, report, "GPS and AHRS differ by %4.1fm", (double)distance);
-                return false;
+        if (gps.num_sensors() > 0) {
+            const Location gps_loc = gps.location();
+            Location ahrs_loc;
+            if (AP::ahrs().get_location(ahrs_loc)) {
+                const float distance = gps_loc.get_distance(ahrs_loc);
+                if (distance > AP_ARMING_AHRS_GPS_ERROR_MAX) {
+                    check_failed(ARMING_CHECK_GPS, report, "GPS and AHRS differ by %4.1fm", (double)distance);
+                    return false;
+                }
             }
         }
     }
 
-    if ((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_GPS_CONFIG)) {
+    if (check_enabled(ARMING_CHECK_GPS_CONFIG)) {
         uint8_t first_unconfigured;
         if (gps.first_unconfigured_gps(first_unconfigured)) {
             check_failed(ARMING_CHECK_GPS_CONFIG,
@@ -489,8 +652,7 @@ bool AP_Arming::gps_checks(bool report)
 
 bool AP_Arming::battery_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_BATTERY)) {
+    if (check_enabled(ARMING_CHECK_BATTERY)) {
 
         char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
         if (!AP::battery().arming_checks(sizeof(buffer), buffer)) {
@@ -503,8 +665,7 @@ bool AP_Arming::battery_checks(bool report)
 
 bool AP_Arming::hardware_safety_check(bool report) 
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_SWITCH)) {
+    if (check_enabled(ARMING_CHECK_SWITCH)) {
 
       // check if safety switch has been pushed
       if (hal.util->safety_switch_state() == AP_HAL::Util::SAFETY_DISARMED) {
@@ -514,6 +675,72 @@ bool AP_Arming::hardware_safety_check(bool report)
     }
 
     return true;
+}
+
+bool AP_Arming::rc_arm_checks(AP_Arming::Method method)
+{
+    // don't check the trims if we are in a failsafe
+    if (!rc().has_valid_input()) {
+        return true;
+    }
+
+    // only check if we've received some form of input within the last second
+    // this is a protection against a vehicle having never enabled an input
+    uint32_t last_input_ms = rc().last_input_ms();
+    if ((last_input_ms == 0) || ((AP_HAL::millis() - last_input_ms) > 1000)) {
+        return true;
+    }
+
+    bool check_passed = true;
+    // ensure all rc channels have different functions
+    if (rc().duplicate_options_exist()) {
+        check_failed(ARMING_CHECK_PARAMETERS, true, "Duplicate Aux Switch Options");
+        check_passed = false;
+    }
+    if (rc().flight_mode_channel_conflicts_with_rc_option()) {
+        check_failed(ARMING_CHECK_PARAMETERS, true, "Mode channel and RC%d_OPTION conflict", rc().flight_mode_channel_number());
+        check_passed = false;
+    }
+    const RCMapper * rcmap = AP::rcmap();
+    if (rcmap != nullptr) {
+        if (!rc().arming_skip_checks_rpy()) {
+            const char *names[3] = {"Roll", "Pitch", "Yaw"};
+            const uint8_t channels[3] = {rcmap->roll(), rcmap->pitch(), rcmap->yaw()};
+            for (uint8_t i = 0; i < ARRAY_SIZE(channels); i++) {
+                const RC_Channel *c = rc().channel(channels[i] - 1);
+                if (c == nullptr) {
+                    continue;
+                }
+                if (c->get_control_in() != 0) {
+                    if ((method != Method::RUDDER) || (c != rc().get_arming_channel())) { // ignore the yaw input channel if rudder arming
+                        check_failed(ARMING_CHECK_RC, true, "%s (RC%d) is not neutral", names[i], channels[i]);
+                        check_passed = false;
+                    }
+                }
+            }
+        }
+
+        // if throttle check is enabled, require zero input
+        if (rc().arming_check_throttle()) {
+            RC_Channel *c = rc().channel(rcmap->throttle() - 1);
+            if (c != nullptr) {
+                if (c->get_control_in() != 0) {
+                    check_failed(ARMING_CHECK_RC, true, "Throttle (RC%d) is not neutral", rcmap->throttle());
+                    check_passed = false;
+                }
+            }
+            c = rc().find_channel_for_option(RC_Channel::AUX_FUNC::FWD_THR);
+            if (c != nullptr) {
+                uint8_t fwd_thr = c->percent_input();
+                // require channel input within 2% of minimum
+                if (fwd_thr > 2) {
+                    check_failed(ARMING_CHECK_RC, true, "VTOL Fwd Throttle is not zero");
+                    check_passed = false;
+                }
+            }
+        }
+    }
+    return check_passed;
 }
 
 bool AP_Arming::rc_calibration_checks(bool report)
@@ -530,11 +757,11 @@ bool AP_Arming::rc_calibration_checks(bool report)
         }
         const uint16_t trim = c->get_radio_trim();
         if (c->get_radio_min() > trim) {
-            check_failed(ARMING_CHECK_RC, report, "RC%d minimum is greater than trim", i + 1);
+            check_failed(ARMING_CHECK_RC, report, "RC%d_MIN is greater than RC%d_TRIM", i + 1, i + 1);
             check_passed = false;
         }
         if (c->get_radio_max() < trim) {
-            check_failed(ARMING_CHECK_RC, report, "RC%d maximum is less than trim", i + 1);
+            check_failed(ARMING_CHECK_RC, report, "RC%d_MAX is less than RC%d_TRIM", i + 1, i + 1);
             check_passed = false;
         }
     }
@@ -542,10 +769,18 @@ bool AP_Arming::rc_calibration_checks(bool report)
     return check_passed;
 }
 
+bool AP_Arming::rc_in_calibration_check(bool report)
+{
+    if (rc().calibrating()) {
+        check_failed(ARMING_CHECK_RC, report, "RC calibrating");
+        return false;
+    }
+    return true;
+}
+
 bool AP_Arming::manual_transmitter_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_RC)) {
+    if (check_enabled(ARMING_CHECK_RC)) {
 
         if (AP_Notify::flags.failsafe_radio) {
             check_failed(ARMING_CHECK_RC, report, "Radio failsafe on");
@@ -557,27 +792,15 @@ bool AP_Arming::manual_transmitter_checks(bool report)
         }
     }
 
-    return true;
+    return rc_in_calibration_check(report);
 }
 
 bool AP_Arming::mission_checks(bool report)
 {
-    if (((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_MISSION)) &&
-        _required_mission_items) {
-        AP_Mission *mission = AP::mission();
+    AP_Mission *mission = AP::mission();
+    if (check_enabled(ARMING_CHECK_MISSION) && _required_mission_items) {
         if (mission == nullptr) {
             check_failed(ARMING_CHECK_MISSION, report, "No mission library present");
-            #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-                AP_HAL::panic("Mission checks requested, but no mission was allocated");
-            #endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
-            return false;
-        }
-        AP_Rally *rally = AP::rally();
-        if (rally == nullptr) {
-            check_failed(ARMING_CHECK_MISSION, report, "No rally library present");
-            #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-                AP_HAL::panic("Mission checks requested, but no rally was allocated");
-            #endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
             return false;
         }
 
@@ -585,12 +808,13 @@ bool AP_Arming::mission_checks(bool report)
           MIS_ITEM_CHECK check;
           MAV_CMD mis_item_type;
           const char *type;
-        } misChecks[5] = {
+        } misChecks[] = {
           {MIS_ITEM_CHECK_LAND,          MAV_CMD_NAV_LAND,           "land"},
           {MIS_ITEM_CHECK_VTOL_LAND,     MAV_CMD_NAV_VTOL_LAND,      "vtol land"},
           {MIS_ITEM_CHECK_DO_LAND_START, MAV_CMD_DO_LAND_START,      "do land start"},
           {MIS_ITEM_CHECK_TAKEOFF,       MAV_CMD_NAV_TAKEOFF,        "takeoff"},
           {MIS_ITEM_CHECK_VTOL_TAKEOFF,  MAV_CMD_NAV_VTOL_TAKEOFF,   "vtol takeoff"},
+          {MIS_ITEM_CHECK_RETURN_TO_LAUNCH,  MAV_CMD_NAV_RETURN_TO_LAUNCH,   "RTL"},
         };
         for (uint8_t i = 0; i < ARRAY_SIZE(misChecks); i++) {
             if (_required_mission_items & misChecks[i].check) {
@@ -601,8 +825,14 @@ bool AP_Arming::mission_checks(bool report)
             }
         }
         if (_required_mission_items & MIS_ITEM_CHECK_RALLY) {
+#if HAL_RALLY_ENABLED
+            AP_Rally *rally = AP::rally();
+            if (rally == nullptr) {
+                check_failed(ARMING_CHECK_MISSION, report, "No rally library present");
+                return false;
+            }
             Location ahrs_loc;
-            if (!AP::ahrs().get_position(ahrs_loc)) {
+            if (!AP::ahrs().get_location(ahrs_loc)) {
                 check_failed(ARMING_CHECK_MISSION, report, "Can't check rally without position");
                 return false;
             }
@@ -611,15 +841,26 @@ bool AP_Arming::mission_checks(bool report)
                 check_failed(ARMING_CHECK_MISSION, report, "No sufficently close rally point located");
                 return false;
             }
-          }
+#else
+            check_failed(ARMING_CHECK_MISSION, report, "No rally library present");
+            return false;
+#endif
+        }
     }
 
+#if AP_SDCARD_STORAGE_ENABLED
+    if (check_enabled(ARMING_CHECK_MISSION) &&
+        mission != nullptr &&
+        (mission->failed_sdcard_storage() || StorageManager::storage_failed())) {
+        check_failed(ARMING_CHECK_MISSION, report, "Failed to open %s", AP_MISSION_SDCARD_FILENAME);
+    }
+#endif
     return true;
 }
 
 bool AP_Arming::rangefinder_checks(bool report)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_RANGEFINDER)) {
+    if (check_enabled(ARMING_CHECK_RANGEFINDER)) {
         RangeFinder *range = RangeFinder::get_singleton();
         if (range == nullptr) {
             return true;
@@ -637,38 +878,61 @@ bool AP_Arming::rangefinder_checks(bool report)
 
 bool AP_Arming::servo_checks(bool report) const
 {
+#if NUM_SERVO_CHANNELS
     bool check_passed = true;
     for (uint8_t i = 0; i < NUM_SERVO_CHANNELS; i++) {
         const SRV_Channel *c = SRV_Channels::srv_channel(i);
-        if (c == nullptr || c->get_function() == SRV_Channel::k_none) {
+        if (c == nullptr || c->get_function() <= SRV_Channel::k_none) {
             continue;
         }
 
         const uint16_t trim = c->get_trim();
         if (c->get_output_min() > trim) {
-            check_failed(report, "SERVO%d minimum is greater than trim", i + 1);
+            check_failed(report, "SERVO%d_MIN is greater than SERVO%d_TRIM", i + 1, i + 1);
             check_passed = false;
         }
         if (c->get_output_max() < trim) {
-            check_failed(report, "SERVO%d maximum is less than trim", i + 1);
+            check_failed(report, "SERVO%d_MAX is less than SERVO%d_TRIM", i + 1, i + 1);
             check_passed = false;
+        }
+
+        // check functions using PWM are enabled
+        if (SRV_Channels::get_disabled_channel_mask() & 1U<<i) {
+            const SRV_Channel::Aux_servo_function_t ch_function = c->get_function();
+
+            // motors, e-stoppable functions, neopixels and ProfiLEDs may be digital outputs and thus can be disabled
+            // scripting can use its functions as labels for LED setup
+            const bool disabled_ok = SRV_Channel::is_motor(ch_function) ||
+                                     SRV_Channel::should_e_stop(ch_function) ||
+                                     (ch_function >= SRV_Channel::k_LED_neopixel1 && ch_function <= SRV_Channel::k_LED_neopixel4) ||
+                                     (ch_function >= SRV_Channel::k_ProfiLED_1 && ch_function <= SRV_Channel::k_ProfiLED_Clock) ||
+                                     (ch_function >= SRV_Channel::k_scripting1 && ch_function <= SRV_Channel::k_scripting16);
+
+            // for all other functions raise a pre-arm failure
+            if (!disabled_ok) {
+                check_failed(report, "SERVO%u_FUNCTION=%u on disabled channel", i + 1, (unsigned)ch_function);
+                check_passed = false;
+            }
         }
     }
 
 #if HAL_WITH_IO_MCU
-    if (!iomcu.healthy()) {
+    if (!iomcu.healthy() && AP_BoardConfig::io_enabled()) {
         check_failed(report, "IOMCU is unhealthy");
         check_passed = false;
     }
 #endif
 
     return check_passed;
+#else
+    return false;
+#endif
 }
 
 bool AP_Arming::board_voltage_checks(bool report)
 {
     // check board voltage
-    if ((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_VOLTAGE)) {
+    if (check_enabled(ARMING_CHECK_VOLTAGE)) {
 #if HAL_HAVE_BOARD_VOLTAGE
         const float bus_voltage =  hal.analogin->board_voltage();
         const float vbus_min = AP_BoardConfig::get_minimum_board_voltage();
@@ -693,16 +957,48 @@ bool AP_Arming::board_voltage_checks(bool report)
     return true;
 }
 
+#if HAL_HAVE_IMU_HEATER
+bool AP_Arming::heater_min_temperature_checks(bool report)
+{
+    if (checks_to_perform & ARMING_CHECK_ALL) {
+        AP_BoardConfig *board = AP::boardConfig();
+        if (board) {
+            float temperature;
+            int8_t min_temperature;
+            if (board->get_board_heater_temperature(temperature) &&
+                board->get_board_heater_arming_temperature(min_temperature) &&
+                (temperature < min_temperature)) {
+                check_failed(ARMING_CHECK_SYSTEM, report, "heater temp low (%0.1f < %i)", temperature, min_temperature);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif // HAL_HAVE_IMU_HEATER
+
 /*
   check base system operations
  */
 bool AP_Arming::system_checks(bool report)
 {
+    char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
+
     if (check_enabled(ARMING_CHECK_SYSTEM)) {
         if (!hal.storage->healthy()) {
             check_failed(ARMING_CHECK_SYSTEM, report, "Param storage failed");
             return false;
         }
+
+        // check main loop rate is at least 90% of expected value
+        const float actual_loop_rate = AP::scheduler().get_filtered_loop_rate_hz();
+        const uint16_t expected_loop_rate = AP::scheduler().get_loop_rate_hz();
+        const float loop_rate_pct =  actual_loop_rate / expected_loop_rate;
+        if (loop_rate_pct < 0.90) {
+            check_failed(ARMING_CHECK_SYSTEM, report, "Main loop slow (%uHz < %uHz)", (unsigned)actual_loop_rate, (unsigned)expected_loop_rate);
+            return false;
+        }
+
 #if AP_TERRAIN_AVAILABLE
         const AP_Terrain *terrain = AP_Terrain::get_singleton();
         if ((terrain != nullptr) && terrain->init_failed()) {
@@ -710,95 +1006,195 @@ bool AP_Arming::system_checks(bool report)
             return false;
         }
 #endif
-#ifdef ENABLE_SCRIPTING
+#if AP_SCRIPTING_ENABLED
         const AP_Scripting *scripting = AP_Scripting::get_singleton();
-        if ((scripting != nullptr) && scripting->enabled() && scripting->init_failed()) {
-            check_failed(ARMING_CHECK_SYSTEM, report, "Scripting out of memory");
+        if ((scripting != nullptr) && !scripting->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_SYSTEM, report, "%s", buffer);
+            return false;
+        }
+#endif
+#if HAL_ADSB_ENABLED
+        AP_ADSB *adsb = AP::ADSB();
+        if ((adsb != nullptr) && adsb->enabled() && adsb->init_failed()) {
+            check_failed(ARMING_CHECK_SYSTEM, report, "ADSB out of memory");
             return false;
         }
 #endif
     }
     if (AP::internalerror().errors() != 0) {
-        check_failed(report, "Internal errors (0x%x)", (unsigned int)AP::internalerror().errors());
+        AP::internalerror().errors_as_string((uint8_t*)buffer, ARRAY_SIZE(buffer));
+        check_failed(report, "Internal errors 0x%x l:%u %s", (unsigned int)AP::internalerror().errors(), AP::internalerror().last_error_line(), buffer);
+        return false;
+    }
+
+    if (!hal.gpio->arming_checks(sizeof(buffer), buffer)) {
+        check_failed(report, "%s", buffer);
+        return false;
+    }
+
+    if (check_enabled(ARMING_CHECK_PARAMETERS)) {
+#if AP_RPM_ENABLED
+        auto *rpm = AP::rpm();
+        if (rpm && !rpm->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
+            return false;
+        }
+#endif
+        auto *relay = AP::relay();
+        if (relay && !relay->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
+            return false;
+        }
+#if HAL_PARACHUTE_ENABLED
+        auto *chute = AP::parachute();
+        if (chute && !chute->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
+            return false;
+        }
+#endif
+#if HAL_BUTTON_ENABLED
+        const auto &button = AP::button();
+        if (!button.arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
+            return false;
+        }
+#endif
+    }
+
+    return true;
+}
+
+bool AP_Arming::terrain_database_required() const
+{
+    AP_Mission *mission = AP::mission();
+    if (mission == nullptr) {
+        // no mission support?
+        return false;
+    }
+    if (mission->contains_terrain_alt_items()) {
+        return true;
+    }
+    return false;
+}
+
+// check terrain database is fit-for-purpose
+bool AP_Arming::terrain_checks(bool report) const
+{
+    if (!check_enabled(ARMING_CHECK_PARAMETERS)) {
+        return true;
+    }
+
+    if (!terrain_database_required()) {
+        return true;
+    }
+
+#if AP_TERRAIN_AVAILABLE
+
+    const AP_Terrain *terrain = AP_Terrain::get_singleton();
+    if (terrain == nullptr) {
+        // this is also a system error, and it is already complaining
+        // about it.
+        return false;
+    }
+
+    if (!terrain->enabled()) {
+        check_failed(ARMING_CHECK_PARAMETERS, report, "terrain disabled");
+        return false;
+    }
+
+    char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+    if (!terrain->pre_arm_checks(fail_msg, sizeof(fail_msg))) {
+        check_failed(ARMING_CHECK_PARAMETERS, report, "%s", fail_msg);
         return false;
     }
 
     return true;
+
+#else
+    check_failed(ARMING_CHECK_PARAMETERS, report, "terrain required but disabled");
+    return false;
+#endif
 }
 
 
 // check nothing is too close to vehicle
 bool AP_Arming::proximity_checks(bool report) const
 {
+#if HAL_PROXIMITY_ENABLED
     const AP_Proximity *proximity = AP::proximity();
     // return true immediately if no sensor present
     if (proximity == nullptr) {
         return true;
     }
-    if (proximity->get_status() == AP_Proximity::Status::NotConnected) {
-        return true;
-    }
-
-    // return false if proximity sensor unhealthy
-    if (proximity->get_status() < AP_Proximity::Status::Good) {
-        check_failed(report, "check proximity sensor");
+    char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+    if (!proximity->prearm_healthy(buffer, ARRAY_SIZE(buffer))) {
+        check_failed(report, "%s", buffer);
         return false;
     }
+    return true;
+#endif
 
     return true;
 }
 
 bool AP_Arming::can_checks(bool report)
 {
-#if HAL_WITH_UAVCAN
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS && HAL_CANMANAGER_ENABLED
     if (check_enabled(ARMING_CHECK_SYSTEM)) {
         char fail_msg[50] = {};
+        (void)fail_msg; // might be left unused
         uint8_t num_drivers = AP::can().get_num_drivers();
 
         for (uint8_t i = 0; i < num_drivers; i++) {
-            switch (AP::can().get_protocol_type(i)) {
-                case AP_BoardConfig_CAN::Protocol_Type_KDECAN: {
+            switch (AP::can().get_driver_type(i)) {
+                case AP_CANManager::Driver_Type_KDECAN: {
 // To be replaced with macro saying if KDECAN library is included
-#if APM_BUILD_TYPE(APM_BUILD_ArduCopter) || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)
+#if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_ArduSub)
                     AP_KDECAN *ap_kdecan = AP_KDECAN::get_kdecan(i);
-                    snprintf(fail_msg, ARRAY_SIZE(fail_msg), "KDECAN failed");
                     if (ap_kdecan != nullptr && !ap_kdecan->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
-                        check_failed(ARMING_CHECK_SYSTEM, report, "%s", fail_msg);
+                        check_failed(ARMING_CHECK_SYSTEM, report, "KDECAN: %s", fail_msg);
                         return false;
                     }
-                    break;
 #endif
+                    break;
                 }
-                case AP_BoardConfig_CAN::Protocol_Type_PiccoloCAN: {
+                case AP_CANManager::Driver_Type_PiccoloCAN: {
 #if HAL_PICCOLO_CAN_ENABLE
                     AP_PiccoloCAN *ap_pcan = AP_PiccoloCAN::get_pcan(i);
 
                     if (ap_pcan != nullptr && !ap_pcan->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
-                        if (fail_msg == nullptr) {
-                            check_failed(ARMING_CHECK_SYSTEM, report, "PiccoloCAN failed");
-                        } else {
-                            check_failed(ARMING_CHECK_SYSTEM, report, "%s", fail_msg);
-                        }
-
+                        check_failed(ARMING_CHECK_SYSTEM, report, "PiccoloCAN: %s", fail_msg);
                         return false;
                     }
 
-                    break;
 #else
                     check_failed(ARMING_CHECK_SYSTEM, report, "PiccoloCAN not enabled");
                     return false;
 #endif
+                    break;
                 }
-                case AP_BoardConfig_CAN::Protocol_Type_UAVCAN:
+                case AP_CANManager::Driver_Type_UAVCAN:
                 {
-                    snprintf(fail_msg, ARRAY_SIZE(fail_msg), "UAVCAN failed");
-                    if (!AP::uavcan_dna_server().prearm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
-                        check_failed(ARMING_CHECK_SYSTEM, report, "%s", fail_msg);
+#if HAL_ENABLE_LIBUAVCAN_DRIVERS
+                    AP_UAVCAN *ap_uavcan = AP_UAVCAN::get_uavcan(i);
+                    if (ap_uavcan != nullptr && !ap_uavcan->prearm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+                        check_failed(ARMING_CHECK_SYSTEM, report, "UAVCAN: %s", fail_msg);
                         return false;
                     }
+#endif
+                    break;
                 }
-                case AP_BoardConfig_CAN::Protocol_Type_None:
-                default:
+                case AP_CANManager::Driver_Type_CANTester:
+                {
+                    check_failed(ARMING_CHECK_SYSTEM, report, "TestCAN: No Arming with TestCAN enabled");
+                    break;
+                }
+                case AP_CANManager::Driver_Type_EFI_NWPMU:
+                case AP_CANManager::Driver_Type_USD1:
+                case AP_CANManager::Driver_Type_None:
+                case AP_CANManager::Driver_Type_Scripting:
+                case AP_CANManager::Driver_Type_Scripting2:
+                case AP_CANManager::Driver_Type_Benewake:
                     break;
             }
         }
@@ -810,6 +1206,7 @@ bool AP_Arming::can_checks(bool report)
 
 bool AP_Arming::fence_checks(bool display_failure)
 {
+#if AP_FENCE_ENABLED
     const AC_Fence *fence = AP::fence();
     if (fence == nullptr) {
         return true;
@@ -828,11 +1225,14 @@ bool AP_Arming::fence_checks(bool display_failure)
     }
 
     return false;
+#else
+    return true;
+#endif
 }
 
 bool AP_Arming::camera_checks(bool display_failure)
 {
-    if ((checks_to_perform & ARMING_CHECK_ALL) || (checks_to_perform & ARMING_CHECK_CAMERA)) {
+    if (check_enabled(ARMING_CHECK_CAMERA)) {
 #if HAL_RUNCAM_ENABLED
         AP_RunCam *runcam = AP::runcam();
         if (runcam == nullptr) {
@@ -850,10 +1250,224 @@ bool AP_Arming::camera_checks(bool display_failure)
     return true;
 }
 
+bool AP_Arming::osd_checks(bool display_failure) const
+{
+#if OSD_PARAM_ENABLED && OSD_ENABLED 
+    if (check_enabled(ARMING_CHECK_CAMERA)) {
+        const AP_OSD *osd = AP::osd();
+        if (osd == nullptr) {
+            return true;
+        }
+
+        // check camera is ready
+        char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+        if (!osd->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+            check_failed(ARMING_CHECK_CAMERA, display_failure, "%s", fail_msg);
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
+bool AP_Arming::mount_checks(bool display_failure) const
+{
+#if HAL_MOUNT_ENABLED
+    if (check_enabled(ARMING_CHECK_CAMERA)) {
+        AP_Mount *mount = AP::mount();
+        if (mount == nullptr) {
+            return true;
+        }
+        char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] = {};
+        if (!mount->pre_arm_checks(fail_msg, sizeof(fail_msg))) {
+            check_failed(ARMING_CHECK_CAMERA, display_failure, "Mount: %s", fail_msg);
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
+bool AP_Arming::fettec_checks(bool display_failure) const
+{
+#if AP_FETTEC_ONEWIRE_ENABLED
+    const AP_FETtecOneWire *f = AP_FETtecOneWire::get_singleton();
+    if (f == nullptr) {
+        return true;
+    }
+
+    // check ESCs are ready
+    char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+    if (!f->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+        check_failed(ARMING_CHECK_ALL, display_failure, "FETtec: %s", fail_msg);
+        return false;
+    }
+#endif
+    return true;
+}
+
+// request an auxiliary authorisation id.  This id should be used in subsequent calls to set_aux_auth_passed/failed
+// returns true on success
+bool AP_Arming::get_aux_auth_id(uint8_t& auth_id)
+{
+    WITH_SEMAPHORE(aux_auth_sem);
+
+    // check we have enough room to allocate another id
+    if (aux_auth_count >= aux_auth_count_max) {
+        aux_auth_error = true;
+        return false;
+    }
+
+    // allocate buffer for failure message
+    if (aux_auth_fail_msg == nullptr) {
+        aux_auth_fail_msg = (char *)calloc(aux_auth_str_len, sizeof(char));
+        if (aux_auth_fail_msg == nullptr) {
+            aux_auth_error = true;
+            return false;
+        }
+    }
+    auth_id = aux_auth_count;
+    aux_auth_count++;
+    return true;
+}
+
+// set auxiliary authorisation passed
+void AP_Arming::set_aux_auth_passed(uint8_t auth_id)
+{
+    WITH_SEMAPHORE(aux_auth_sem);
+
+    // sanity check auth_id
+    if (auth_id >= aux_auth_count) {
+        return;
+    }
+
+    aux_auth_state[auth_id] = AuxAuthStates::AUTH_PASSED;
+}
+
+// set auxiliary authorisation failed and provide failure message
+void AP_Arming::set_aux_auth_failed(uint8_t auth_id, const char* fail_msg)
+{
+    WITH_SEMAPHORE(aux_auth_sem);
+
+    // sanity check auth_id
+    if (auth_id >= aux_auth_count) {
+        return;
+    }
+
+    // update state
+    aux_auth_state[auth_id] = AuxAuthStates::AUTH_FAILED;
+
+    // store failure message if this authoriser has the lowest auth_id
+    for (uint8_t i = 0; i < auth_id; i++) {
+        if (aux_auth_state[i] == AuxAuthStates::AUTH_FAILED) {
+            return;
+        }
+    }
+    if (aux_auth_fail_msg != nullptr) {
+        if (fail_msg == nullptr) {
+            strncpy(aux_auth_fail_msg, "Auxiliary authorisation refused", aux_auth_str_len);
+        } else {
+            strncpy(aux_auth_fail_msg, fail_msg, aux_auth_str_len);
+        }
+        aux_auth_fail_msg_source = auth_id;
+    }
+}
+
+bool AP_Arming::aux_auth_checks(bool display_failure)
+{
+    // handle error cases
+    if (aux_auth_error) {
+        if (aux_auth_fail_msg == nullptr) {
+            check_failed(ARMING_CHECK_AUX_AUTH, display_failure, "memory low for auxiliary authorisation");
+        } else {
+            check_failed(ARMING_CHECK_AUX_AUTH, display_failure, "Too many auxiliary authorisers");
+        }
+        return false;
+    }
+
+    WITH_SEMAPHORE(aux_auth_sem);
+
+    // check results for each auxiliary authorisation id
+    bool some_failures = false;
+    bool failure_msg_sent = false;
+    bool waiting_for_responses = false;
+    for (uint8_t i = 0; i < aux_auth_count; i++) {
+        switch (aux_auth_state[i]) {
+        case AuxAuthStates::NO_RESPONSE:
+            waiting_for_responses = true;
+            break;
+        case AuxAuthStates::AUTH_FAILED:
+            some_failures = true;
+            if (i == aux_auth_fail_msg_source) {
+                check_failed(ARMING_CHECK_AUX_AUTH, display_failure, "%s", aux_auth_fail_msg);
+                failure_msg_sent = true;
+            }
+            break;
+        case AuxAuthStates::AUTH_PASSED:
+            break;
+        }
+    }
+
+    // send failure or waiting message
+    if (some_failures) {
+        if (!failure_msg_sent) {
+            check_failed(ARMING_CHECK_AUX_AUTH, display_failure, "Auxiliary authorisation refused");
+        }
+        return false;
+    } else if (waiting_for_responses) {
+        check_failed(ARMING_CHECK_AUX_AUTH, display_failure, "Waiting for auxiliary authorisation");
+        return false;
+    }
+
+    // if we got this far all auxiliary checks must have passed
+    return true;
+}
+
+bool AP_Arming::generator_checks(bool display_failure) const
+{
+#if HAL_GENERATOR_ENABLED
+    const AP_Generator *generator = AP::generator();
+    if (generator == nullptr) {
+        return true;
+    }
+    char failure_msg[50] = {};
+    if (!generator->pre_arm_check(failure_msg, sizeof(failure_msg))) {
+        check_failed(display_failure, "Generator: %s", failure_msg);
+        return false;
+    }
+#endif
+    return true;
+}
+
+// OpenDroneID Checks
+bool AP_Arming::opendroneid_checks(bool display_failure)
+{
+#if AP_OPENDRONEID_ENABLED
+    auto &opendroneid = AP::opendroneid();
+
+    char failure_msg[50] {};
+    if (!opendroneid.pre_arm_check(failure_msg, sizeof(failure_msg))) {
+        check_failed(display_failure, "OpenDroneID: %s", failure_msg);
+        return false;
+    }
+#endif
+    return true;
+}
+
+//Check for multiple RC in serial protocols
+bool AP_Arming::serial_protocol_checks(bool display_failure)
+{
+    if (AP::serialmanager().have_serial(AP_SerialManager::SerialProtocol_RCIN, 1)) {
+       check_failed(display_failure, "Multiple SERIAL ports configured for RC input");
+       return false;
+    }
+    return true;
+}
+
 bool AP_Arming::pre_arm_checks(bool report)
 {
-#if !APM_BUILD_TYPE(APM_BUILD_ArduCopter)
-    if (armed || require == (uint8_t)Required::NO) {
+#if !APM_BUILD_COPTER_OR_HELI
+    if (armed || arming_required() == Required::NO) {
         // if we are already armed or don't need any arming checks
         // then skip the checks
         return true;
@@ -861,6 +1475,9 @@ bool AP_Arming::pre_arm_checks(bool report)
 #endif
 
     return hardware_safety_check(report)
+#if HAL_HAVE_IMU_HEATER
+        &  heater_min_temperature_checks(report)
+#endif
         &  barometer_checks(report)
         &  ins_checks(report)
         &  compass_checks(report)
@@ -873,21 +1490,47 @@ bool AP_Arming::pre_arm_checks(bool report)
         &  servo_checks(report)
         &  board_voltage_checks(report)
         &  system_checks(report)
+        &  terrain_checks(report)
         &  can_checks(report)
+        &  generator_checks(report)
         &  proximity_checks(report)
-        &  camera_checks(report);
+        &  camera_checks(report)
+        &  osd_checks(report)
+        &  mount_checks(report)
+        &  fettec_checks(report)
+        &  visodom_checks(report)
+        &  aux_auth_checks(report)
+        &  disarm_switch_checks(report)
+        &  fence_checks(report)
+        &  opendroneid_checks(report)
+        &  serial_protocol_checks(report);
 }
 
 bool AP_Arming::arm_checks(AP_Arming::Method method)
 {
+    if (check_enabled(ARMING_CHECK_RC)) {
+        if (!rc_arm_checks(method)) {
+            return false;
+        }
+    }
+
     // ensure the GPS drivers are ready on any final changes
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_GPS_CONFIG)) {
+    if (check_enabled(ARMING_CHECK_GPS_CONFIG)) {
         if (!AP::gps().prepare_for_arming()) {
             return false;
         }
     }
-    
+
+#if AP_FENCE_ENABLED
+    AC_Fence *fence = AP::fence();
+    if (fence != nullptr) {
+        // If a fence is set to auto-enable, turn on the fence
+        if(fence->auto_enabled() == AC_Fence::AutoEnable::ONLY_WHEN_ARMED) {
+            fence->enable(true);
+        }
+    }
+#endif
+
     // note that this will prepare AP_Logger to start logging
     // so should be the last check to be done before arming
 
@@ -900,13 +1543,23 @@ bool AP_Arming::arm_checks(AP_Arming::Method method)
         // If we're configured to log, prep it
         logger->PrepForArming();
         if (!logger->logging_started() &&
-            ((checks_to_perform & ARMING_CHECK_ALL) ||
-             (checks_to_perform & ARMING_CHECK_LOGGING))) {
+            check_enabled(ARMING_CHECK_LOGGING)) {
             check_failed(ARMING_CHECK_LOGGING, true, "Logging not started");
             return false;
         }
     }
     return true;
+}
+
+bool AP_Arming::mandatory_checks(bool report)
+{
+    bool ret = true;
+#if AP_OPENDRONEID_ENABLED
+    ret &= opendroneid_checks(report);
+#endif
+    ret &= rc_in_calibration_check(report);
+    ret &= serial_protocol_checks(report);
+    return ret;
 }
 
 //returns true if arming occurred successfully
@@ -916,8 +1569,12 @@ bool AP_Arming::arm(AP_Arming::Method method, const bool do_arming_checks)
         return false;
     }
 
+    running_arming_checks = true;  // so we show Arm: rather than Disarm: in messages
+
     if ((!do_arming_checks && mandatory_checks(true)) || (pre_arm_checks(true) && arm_checks(method))) {
         armed = true;
+
+        _last_arm_method = method;
 
         Log_Write_Arm(!do_arming_checks, method); // note Log_Write_Armed takes forced not do_arming_checks
 
@@ -926,18 +1583,46 @@ bool AP_Arming::arm(AP_Arming::Method method, const bool do_arming_checks)
         armed = false;
     }
 
+    running_arming_checks = false;
+
+    if (armed && do_arming_checks && checks_to_perform == 0) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Warning: Arming Checks Disabled");
+    }
+    
+#if HAL_GYROFFT_ENABLED
+    // make sure the FFT subsystem is enabled if arming checks have been disabled
+    AP_GyroFFT *fft = AP::fft();
+    if (fft != nullptr) {
+        fft->prepare_for_arming();
+    }
+#endif
+
+#if AP_TERRAIN_AVAILABLE
+    if (armed) {
+        // tell terrain we have just armed, so it can setup
+        // a reference location for terrain adjustment
+        auto *terrain = AP::terrain();
+        if (terrain != nullptr) {
+            terrain->set_reference_location();
+        }
+    }
+#endif
+
     return armed;
 }
 
 //returns true if disarming occurred successfully
-bool AP_Arming::disarm() 
+bool AP_Arming::disarm(const AP_Arming::Method method, bool do_disarm_checks)
 {
     if (!armed) { // already disarmed
         return false;
     }
     armed = false;
+    _last_disarm_method = method;
 
-    Log_Write_Disarm(); // should be able to pass through method and/or force here?
+    Log_Write_Disarm(!do_disarm_checks, method);  // Log_Write_Disarm takes "force"
+
+    check_forced_logging(method);
 
 #if HAL_HAVE_SAFETY_SWITCH
     AP_BoardConfig *board_cfg = AP_BoardConfig::get_singleton();
@@ -947,12 +1632,36 @@ bool AP_Arming::disarm()
     }
 #endif // HAL_HAVE_SAFETY_SWITCH
 
+#if HAL_GYROFFT_ENABLED
+    AP_GyroFFT *fft = AP::fft();
+    if (fft != nullptr) {
+        fft->save_params_on_disarm();
+    }
+#endif
+
+#if AP_FENCE_ENABLED
+    AC_Fence *fence = AP::fence();
+    if (fence != nullptr) {
+        if(fence->auto_enabled() == AC_Fence::AutoEnable::ONLY_WHEN_ARMED) {
+            fence->enable(false);
+        }
+    }
+#endif
+
     return true;
 }
 
-AP_Arming::Required AP_Arming::arming_required() 
+AP_Arming::Required AP_Arming::arming_required() const
 {
-    return (AP_Arming::Required)require.get();
+#if AP_OPENDRONEID_ENABLED
+    // cannot be disabled if OpenDroneID is present
+    if (AP_OpenDroneID::get_singleton() != nullptr && AP::opendroneid().enabled()) {
+        if (require != Required::YES_MIN_PWM && require != Required::YES_ZERO_PWM) {
+            return Required::YES_MIN_PWM;
+        }
+    }
+#endif
+    return require;
 }
 
 // Copter and sub share the same RC input limits
@@ -960,7 +1669,7 @@ AP_Arming::Required AP_Arming::arming_required()
 bool AP_Arming::rc_checks_copter_sub(const bool display_failure, const RC_Channel *channels[4]) const
 {
     // set rc-checks to success if RC checks are disabled
-    if ((checks_to_perform != ARMING_CHECK_ALL) && !(checks_to_perform & ARMING_CHECK_RC)) {
+    if (!check_enabled(ARMING_CHECK_RC)) {
         return true;
     }
 
@@ -972,11 +1681,11 @@ bool AP_Arming::rc_checks_copter_sub(const bool display_failure, const RC_Channe
         const RC_Channel *channel = channels[i];
         const char *channel_name = channel_names[i];
         // check if radio has been calibrated
-        if (channel->get_radio_min() > 1300) {
+        if (channel->get_radio_min() > RC_Channel::RC_CALIB_MIN_LIMIT_PWM) {
             check_failed(ARMING_CHECK_RC, display_failure, "%s radio min too high", channel_name);
             ret = false;
         }
-        if (channel->get_radio_max() < 1700) {
+        if (channel->get_radio_max() < RC_Channel::RC_CALIB_MAX_LIMIT_PWM) {
             check_failed(ARMING_CHECK_RC, display_failure, "%s radio max too low", channel_name);
             ret = false;
         }
@@ -1001,6 +1710,40 @@ bool AP_Arming::rc_checks_copter_sub(const bool display_failure, const RC_Channe
     return ret;
 }
 
+// check visual odometry is working
+bool AP_Arming::visodom_checks(bool display_failure) const
+{
+    if (!check_enabled(ARMING_CHECK_VISION)) {
+        return true;
+    }
+
+#if HAL_VISUALODOM_ENABLED
+    AP_VisualOdom *visual_odom = AP::visualodom();
+    if (visual_odom != nullptr) {
+        char fail_msg[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+        if (!visual_odom->pre_arm_check(fail_msg, ARRAY_SIZE(fail_msg))) {
+            check_failed(ARMING_CHECK_VISION, display_failure, "VisOdom: %s", fail_msg);
+            return false;
+        }
+    }
+#endif
+
+    return true;
+}
+
+// check disarm switch is asserted
+bool AP_Arming::disarm_switch_checks(bool display_failure) const
+{
+    const RC_Channel *chan = rc().find_channel_for_option(RC_Channel::AUX_FUNC::DISARM);
+    if (chan != nullptr &&
+        chan->get_aux_switch_pos() == RC_Channel::AuxSwitchPos::HIGH) {
+        check_failed(display_failure, "Disarm Switch on");
+        return false;
+    }
+
+    return true;
+}
+
 void AP_Arming::Log_Write_Arm(const bool forced, const AP_Arming::Method method)
 {
     const struct log_Arm_Disarm pkt {
@@ -1015,18 +1758,67 @@ void AP_Arming::Log_Write_Arm(const bool forced, const AP_Arming::Method method)
     AP::logger().Write_Event(LogEvent::ARMED);
 }
 
-void AP_Arming::Log_Write_Disarm()
+void AP_Arming::Log_Write_Disarm(const bool forced, const AP_Arming::Method method)
 {
     const struct log_Arm_Disarm pkt {
         LOG_PACKET_HEADER_INIT(LOG_ARM_DISARM_MSG),
         time_us                 : AP_HAL::micros64(),
         arm_state               : is_armed(),
         arm_checks              : 0,
-        forced                  : 0,
-        method                  : 0
+        forced                  : forced,
+        method                  : (uint8_t)method
     };
     AP::logger().WriteCriticalBlock(&pkt, sizeof(pkt));
     AP::logger().Write_Event(LogEvent::DISARMED);
+}
+
+// check if we should keep logging after disarming
+void AP_Arming::check_forced_logging(const AP_Arming::Method method)
+{
+    // keep logging if disarmed for a bad reason
+    switch(method) {
+        case Method::TERMINATION:
+        case Method::CPUFAILSAFE:
+        case Method::BATTERYFAILSAFE:
+        case Method::AFS:
+        case Method::ADSBCOLLISIONACTION:
+        case Method::PARACHUTE_RELEASE:
+        case Method::CRASH:
+        case Method::FENCEBREACH:
+        case Method::RADIOFAILSAFE:
+        case Method::GCSFAILSAFE:
+        case Method::TERRRAINFAILSAFE:
+        case Method::FAILSAFE_ACTION_TERMINATE:
+        case Method::TERRAINFAILSAFE:
+        case Method::BADFLOWOFCONTROL:
+        case Method::EKFFAILSAFE:
+        case Method::GCS_FAILSAFE_SURFACEFAILED:
+        case Method::GCS_FAILSAFE_HOLDFAILED:
+        case Method::PILOT_INPUT_FAILSAFE:
+        case Method::DEADRECKON_FAILSAFE:
+            // keep logging for longer if disarmed for a bad reason
+            AP::logger().set_long_log_persist(true);
+            return;
+
+        case Method::RUDDER:
+        case Method::MAVLINK:
+        case Method::AUXSWITCH:
+        case Method::MOTORTEST:
+        case Method::SCRIPTING:
+        case Method::SOLOPAUSEWHENLANDED:
+        case Method::LANDED:
+        case Method::MISSIONEXIT:
+        case Method::DISARMDELAY:
+        case Method::MOTORDETECTDONE:
+        case Method::TAKEOFFTIMEOUT:
+        case Method::AUTOLANDED:
+        case Method::TOYMODELANDTHROTTLE:
+        case Method::TOYMODELANDFORCE:
+        case Method::LANDING:
+        case Method::UNKNOWN:
+            AP::logger().set_long_log_persist(false);
+            return;
+    };
 }
 
 AP_Arming *AP_Arming::_singleton = nullptr;

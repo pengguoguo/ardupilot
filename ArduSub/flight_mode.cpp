@@ -10,7 +10,6 @@ bool Sub::set_mode(control_mode_t mode, ModeReason reason)
     // return immediately if we are already in the desired mode
     if (mode == control_mode) {
         prev_control_mode = control_mode;
-        prev_control_mode_reason = control_mode_reason;
 
         control_mode_reason = reason;
         return true;
@@ -70,7 +69,6 @@ bool Sub::set_mode(control_mode_t mode, ModeReason reason)
         exit_mode(control_mode, mode);
 
         prev_control_mode = control_mode;
-        prev_control_mode_reason = control_mode_reason;
 
         control_mode = mode;
         control_mode_reason = reason;
@@ -80,11 +78,11 @@ bool Sub::set_mode(control_mode_t mode, ModeReason reason)
         // update notify object
         notify_flight_mode(control_mode);
 
-#if CAMERA == ENABLED
+#if AP_CAMERA_ENABLED
         camera.set_is_auto_mode(control_mode == AUTO);
 #endif
 
-#if AC_FENCE == ENABLED
+#if AP_FENCE_ENABLED
         // pilot requested flight mode change during a fence breach indicates pilot is attempting to manually recover
         // this flight mode change could be automatic (i.e. fence, battery, GPS or GCS failsafe)
         // but it should be harmless to disable the fence temporarily in these situations as well
@@ -165,9 +163,9 @@ void Sub::exit_mode(control_mode_t old_control_mode, control_mode_t new_control_
         if (mission.state() == AP_Mission::MISSION_RUNNING) {
             mission.stop();
         }
-#if MOUNT == ENABLED
+#if HAL_MOUNT_ENABLED
         camera_mount.set_mode_to_default();
-#endif  // MOUNT == ENABLED
+#endif  // HAL_MOUNT_ENABLED
     }
 }
 

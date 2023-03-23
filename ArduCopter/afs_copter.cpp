@@ -6,12 +6,6 @@
 
 #if ADVANCED_FAILSAFE == ENABLED
 
-// Constructor
-AP_AdvancedFailsafe_Copter::AP_AdvancedFailsafe_Copter(AP_Mission &_mission) :
-    AP_AdvancedFailsafe(_mission)
-{}
-
-
 /*
   setup radio_out values for all channels to termination values
  */
@@ -25,7 +19,7 @@ void AP_AdvancedFailsafe_Copter::terminate_vehicle(void)
         copter.motors->output();
 
         // disarm as well
-        copter.arming.disarm();
+        copter.arming.disarm(AP_Arming::Method::AFS);
     
         // and set all aux channels
         SRV_Channels::set_output_limit(SRV_Channel::k_heli_rsc, SRV_Channel::Limit::TRIM);
@@ -51,7 +45,7 @@ void AP_AdvancedFailsafe_Copter::setup_IO_failsafe(void)
 
 #if FRAME_CONFIG != HELI_FRAME
     // setup AP_Motors outputs for failsafe
-    uint16_t mask = copter.motors->get_motor_mask();
+    uint32_t mask = copter.motors->get_motor_mask();
     hal.rcout->set_failsafe_pwm(mask, copter.motors->get_pwm_output_min());
 #endif
 }
@@ -61,8 +55,9 @@ void AP_AdvancedFailsafe_Copter::setup_IO_failsafe(void)
  */
 AP_AdvancedFailsafe::control_mode AP_AdvancedFailsafe_Copter::afs_mode(void)
 {
-    switch (copter.control_mode) {
+    switch (copter.flightmode->mode_number()) {
     case Mode::Number::AUTO:
+    case Mode::Number::AUTO_RTL:
     case Mode::Number::GUIDED:
     case Mode::Number::RTL:
     case Mode::Number::LAND:

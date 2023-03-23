@@ -2,6 +2,8 @@
 
 #include "AP_Baro_Backend.h"
 
+#if AP_BARO_UAVCAN_ENABLED
+
 #include <AP_UAVCAN/AP_UAVCAN.h>
 
 class PressureCb;
@@ -12,10 +14,6 @@ public:
     AP_Baro_UAVCAN(AP_Baro &baro);
 
     void update() override;
-
-    inline void register_sensor() {
-        _instance = _frontend.register_sensor();
-    }
 
     static void subscribe_msgs(AP_UAVCAN* ap_uavcan);
     static AP_Baro_UAVCAN* get_uavcan_backend(AP_UAVCAN* ap_uavcan, uint8_t node_id, bool create_new);
@@ -48,3 +46,5 @@ private:
 
     static HAL_Semaphore _sem_registry;
 };
+
+#endif  // AP_BARO_UAVCAN_ENABLED

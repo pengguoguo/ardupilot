@@ -20,12 +20,14 @@
   Andrew Tridgell and CanberraUAV, August 2012
 */
 
+#include "AP_AdvancedFailsafe_config.h"
+
+#if AP_ADVANCEDFAILSAFE_ENABLED
+
 #include <AP_Common/AP_Common.h>
 #include <AP_Param/AP_Param.h>
-#include <AP_Mission/AP_Mission.h>
-#include <AP_RCMapper/AP_RCMapper.h>
 #include <inttypes.h>
-
+#include <AP_Common/Location.h>
 
 class AP_AdvancedFailsafe
 {
@@ -49,12 +51,10 @@ public:
     };
 
     /* Do not allow copies */
-    AP_AdvancedFailsafe(const AP_AdvancedFailsafe &other) = delete;
-    AP_AdvancedFailsafe &operator=(const AP_AdvancedFailsafe&) = delete;
+    CLASS_NO_COPY(AP_AdvancedFailsafe);
 
     // Constructor
-    AP_AdvancedFailsafe(AP_Mission &_mission) :
-        mission(_mission)
+    AP_AdvancedFailsafe()
         {
             AP_Param::setup_object_defaults(this, var_info);
             if (_singleton != nullptr) {
@@ -76,7 +76,7 @@ public:
     bool enabled() { return _enable; }
 
     // check that everything is OK
-    void check(uint32_t last_heartbeat_ms, bool geofence_breached, uint32_t last_valid_rc_ms);
+    void check(uint32_t last_valid_rc_ms);
 
     // generate heartbeat msgs, so external failsafe boards are happy
     // during sensor calibration
@@ -106,8 +106,6 @@ protected:
     virtual enum control_mode afs_mode(void) = 0;
 
     enum state _state;
-
-    AP_Mission &mission;
 
     AP_Int8 _enable;
     // digital output pins for communicating with the failsafe board
@@ -169,3 +167,5 @@ private:
 namespace AP {
     AP_AdvancedFailsafe *advancedfailsafe();
 };
+
+#endif  // AP_ADVANCEDFAILSAFE_ENABLED

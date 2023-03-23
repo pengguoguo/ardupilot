@@ -1,6 +1,11 @@
 #include "GCS_Tracker.h"
 #include "Tracker.h"
 
+uint8_t GCS_Tracker::sysid_this_mav() const
+{
+    return tracker.g.sysid_this_mav;
+}
+
 void GCS_Tracker::request_datastream_position(const uint8_t sysid, const uint8_t compid)
 {
     for (uint8_t i=0; i < num_gcs(); i++) {
@@ -53,7 +58,11 @@ void GCS_Tracker::update_vehicle_sensor_status_flags()
         MAV_SYS_STATUS_SENSOR_YAW_POSITION;
 }
 
+#if AP_LTM_TELEM_ENABLED
 // avoid building/linking LTM:
 void AP_LTM_Telem::init() {};
+#endif
+#if AP_DEVO_TELEM_ENABLED
 // avoid building/linking Devo:
 void AP_DEVO_Telem::init() {};
+#endif
