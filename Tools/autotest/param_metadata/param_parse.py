@@ -12,7 +12,6 @@ import copy
 import os
 import re
 import sys
-import glob
 from argparse import ArgumentParser
 
 from param import (Library, Parameter, Vehicle, known_group_fields,
@@ -23,7 +22,6 @@ from rstlatexpdfemit import RSTLATEXPDFEmit
 from xmlemit import XmlEmit
 from mdemit import MDEmit
 from jsonemit import JSONEmit
-from xmlemit_mp import XmlEmitMP
 
 parser = ArgumentParser(description="Parse ArduPilot parameters.")
 parser.add_argument("-v", "--verbose", dest='verbose', action='store_true', default=False, help="show debugging output")
@@ -37,7 +35,7 @@ parser.add_argument("--format",
                     dest='output_format',
                     action='store',
                     default='all',
-                    choices=['all', 'html', 'rst', 'rstlatexpdf', 'wiki', 'xml', 'json', 'edn', 'md', 'xml_mp'],
+                    choices=['all', 'html', 'rst', 'rstlatexpdf', 'wiki', 'xml', 'json', 'edn', 'md'],
                     help="what output format to use")
 
 args = parser.parse_args()
@@ -67,7 +65,7 @@ def find_vehicle_parameter_filepath(vehicle_name):
         "Sub": "ArduSub",
     }
 
-    # first try ArduCopter/Parmameters.cpp
+    # first try ArduCopter/Parameters.cpp
     for top_dir in apm_path, apm_tools_path:
         path = os.path.join(top_dir, vehicle_name, "Parameters.cpp")
         if os.path.exists(path):
@@ -91,27 +89,31 @@ def debug(str_to_print):
 def lua_applets():
     '''return list of Library objects for lua applets and drivers'''
     lua_lib = Library("", reference="Lua Script", not_rst=True, check_duplicates=True)
-    patterns = ["libraries/AP_Scripting/applets/*.lua", "libraries/AP_Scripting/drivers/*.lua"]
+    dirs = ["libraries/AP_Scripting/applets", "libraries/AP_Scripting/drivers"]
     paths = []
-    for p in patterns:
-        debug("Adding lua paths %s" % p)
-        luafiles = glob.glob(os.path.join(apm_path, p))
-        for f in luafiles:
-            # the library is expected to have the path as a relative path from within
-            # a vehicle directory
-            f = f.replace(apm_path, "../")
-            paths.append(f)
+    for d in dirs:
+        for root, dirs, files in os.walk(os.path.join(apm_path, d)):
+            for file in files:
+                if not file.endswith(".lua"):
+                    continue
+                f = os.path.join(root, file)
+                debug("Adding lua path %s" % f)
+                # the library is expected to have the path as a relative path from within
+                # a vehicle directory
+                f = f.replace(apm_path, "../")
+                paths.append(f)
     setattr(lua_lib, "Path", ','.join(paths))
     return lua_lib
 
 
 libraries = []
 
-# AP_Vehicle also has parameters rooted at "", but isn't referenced
-# from the vehicle in any way:
-ap_vehicle_lib = Library("") # the "" is tacked onto the front of param name
-setattr(ap_vehicle_lib, "Path", os.path.join('..', 'libraries', 'AP_Vehicle', 'AP_Vehicle.cpp'))
-libraries.append(ap_vehicle_lib)
+if args.vehicle != "AP_Periph":
+    # AP_Vehicle also has parameters rooted at "", but isn't referenced
+    # from the vehicle in any way:
+    ap_vehicle_lib = Library("", reference="VEHICLE") # the "" is tacked onto the front of param name
+    setattr(ap_vehicle_lib, "Path", os.path.join('..', 'libraries', 'AP_Vehicle', 'AP_Vehicle.cpp'))
+    libraries.append(ap_vehicle_lib)
 
 libraries.append(lua_applets())
 
@@ -218,6 +220,10 @@ def process_vehicle(vehicle):
                 setattr(p, field[0], field[1])
             else:
                 error("param: unknown parameter metadata field '%s'" % field[0])
+
+        if (getattr(p, 'Values', None) is not None and
+                getattr(p, 'Bitmask', None) is not None):
+            error("Both @Values and @Bitmask present")
 
         vehicle.params.append(p)
     current_file = None
@@ -350,11 +356,25 @@ def process_library(vehicle, library, pathprefix=None):
                     # applicable for this vehicle.
                     continue
 
-            p.path = path # Add path. Later deleted - only used for duplicates
-            if library.check_duplicates and library.has_param(p.name):
-                error("Duplicate parameter %s in %s" % (p.name, library.name))
-                continue
-            library.params.append(p)
+            if getattr(p, 'Vector3Parameter', None) is not None:
+                params_to_add = []
+                for axis in 'X', 'Y', 'Z':
+                    new_p = copy.copy(p)
+                    new_p.change_name(p.name + "_" + axis)
+                    for a in ["Description"]:
+                        if hasattr(new_p, a):
+                            current = getattr(new_p, a)
+                            setattr(new_p, a, current + " (%s-axis)" % axis)
+                    params_to_add.append(new_p)
+            else:
+                params_to_add = [p]
+
+            for p in params_to_add:
+                p.path = path # Add path. Later deleted - only used for duplicates
+                if library.check_duplicates and library.has_param(p.name):
+                    error("Duplicate parameter %s in %s" % (p.name, library.name))
+                    continue
+                library.params.append(p)
 
         group_matches = prog_groups.findall(p_text)
         debug("Found %u groups" % len(group_matches))
@@ -424,13 +444,16 @@ def clean_param(param):
         for i in valueList:
             (start, sep, end) = i.partition(":")
             if sep != ":":
-                raise ValueError("Expected a colon seperator in (%s)" % (i,))
+                raise ValueError("Expected a colon separator in (%s)" % (i,))
             if len(end) == 0:
                 raise ValueError("Expected a colon-separated string, got (%s)" % i)
             end = end.strip()
             start = start.strip()
             new_valueList.append(":".join([start, end]))
         param.Values = ",".join(new_valueList)
+
+    if hasattr(param, "Vector3Parameter"):
+        delattr(param, "Vector3Parameter")
 
 
 def do_copy_values(vehicle_params, libraries, param):
@@ -439,6 +462,10 @@ def do_copy_values(vehicle_params, libraries, param):
 
     # so go and find the values...
     wanted_name = param.CopyValuesFrom
+    if hasattr(param, 'Vector3Parameter'):
+        suffix = param.name[-2:]
+        wanted_name += suffix
+
     del param.CopyValuesFrom
     for x in vehicle_params:
         name = x.name
@@ -468,6 +495,11 @@ def do_copy_fields(vehicle_params, libraries, param):
     # so go and find the values...
     wanted_name = param.CopyFieldsFrom
     del param.CopyFieldsFrom
+
+    if hasattr(param, 'Vector3Parameter'):
+        suffix = param.name[-2:]
+        wanted_name += suffix
+
     for x in vehicle_params:
         name = x.name
         (v, name) = name.split(":")
@@ -602,7 +634,6 @@ all_emitters = {
     'rst': RSTEmit,
     'rstlatexpdf': RSTLATEXPDFEmit,
     'md': MDEmit,
-    'xml_mp': XmlEmitMP,
 }
 
 try:
